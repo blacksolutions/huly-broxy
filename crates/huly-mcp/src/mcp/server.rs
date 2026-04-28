@@ -234,6 +234,7 @@ pub struct HulyMcpServer {
 }
 
 impl HulyMcpServer {
+    #[allow(dead_code)]
     pub fn new(registry: BridgeRegistry, http_client: BridgeHttpClient) -> Self {
         Self::with_catalog(registry, http_client, Catalog::default())
     }

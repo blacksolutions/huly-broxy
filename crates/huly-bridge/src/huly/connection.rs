@@ -302,6 +302,19 @@ impl WsConnection {
                     warn!(code = %err.code, message = %err.message, id = response.id, "transactor error");
                 }
 
+                // Filter the application-level ping echo. The transactor
+                // replies to each Text-frame `"ping"` keepalive with
+                // `{"result":"ping"}` and no matching id; without this
+                // guard it would surface as an unsolicited server-push
+                // event every cycle and pollute the event channel.
+                if response.id == -1
+                    && response.error.is_none()
+                    && response.result.as_ref().and_then(Value::as_str) == Some("ping")
+                {
+                    debug!("ws ping echo received");
+                    continue;
+                }
+
                 if response.id == -1 {
                     // id=-1: either the hello handshake reply or a server push
                     let mut hs = read_handshake_tx.lock().await;
@@ -330,7 +343,17 @@ impl WsConnection {
             }
         });
 
-        // Spawn ping task to keep the WebSocket alive
+        // Spawn ping task to keep the WebSocket alive.
+        //
+        // The keepalive is a **Text data frame** carrying the bare string
+        // `"ping"` — matching the official Huly TS client (see
+        // `huly.core/packages/client-resources/src/connection.ts`). WS Ping
+        // *control* frames look correct on the wire but are silently
+        // ignored by several L7 proxies (AWS ALB, some nginx configs)
+        // when they decide whether to reset the idle timer; the bridge
+        // would then get cleanly closed by the proxy at its idle limit
+        // (~60s in the wild) despite a healthy 10s ping cadence. A data
+        // frame counts as activity everywhere.
         let ping_handle = if ping_interval_secs > 0 {
             let ping_tx = write_tx.clone();
             let ping_connected = connected.clone();
@@ -343,7 +366,7 @@ impl WsConnection {
                     if !ping_connected.load(std::sync::atomic::Ordering::SeqCst) {
                         break;
                     }
-                    if ping_tx.send(Message::Ping(vec![].into())).await.is_err() {
+                    if ping_tx.send(Message::Text("ping".into())).await.is_err() {
                         break;
                     }
                     debug!("ws ping sent");
@@ -1157,5 +1180,99 @@ mod tests {
             }
             other => panic!("non-binary mode must emit a Text frame, got {other:?}"),
         }
+    }
+
+    /// Regression: the WebSocket keepalive must be a **Text data frame**
+    /// containing the bare string `"ping"`, not a WebSocket Ping control
+    /// frame. Several L7 proxies (AWS ALB, some nginx configs) only count
+    /// data frames as activity — control frames don't reset the idle
+    /// timer, so a control-frame keepalive lets the proxy close the
+    /// connection at its idle timeout (~60s in the wild) mid-session.
+    /// The official Huly TS client uses this same Text-frame heartbeat.
+    /// The transactor's `{"result":"ping"}` echo must be filtered, not
+    /// surfaced as a server-push event.
+    #[tokio::test]
+    async fn keepalive_uses_text_data_frame_and_filters_echo() {
+        use tokio::sync::oneshot;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (frame_tx, frame_rx) = oneshot::channel::<Message>();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws_stream.split();
+
+            // Hello.
+            if let Some(Ok(Message::Text(text))) = read.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_i64().unwrap();
+                let hello_resp =
+                    serde_json::json!({"id": id, "binary": false, "compression": false});
+                write
+                    .send(Message::Text(hello_resp.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+
+            // Capture the next frame (the keepalive under test) and echo
+            // the application-level pong so the bridge's read loop must
+            // exercise its filter path.
+            if let Some(Ok(msg)) = read.next().await {
+                write
+                    .send(Message::Text(r#"{"result":"ping"}"#.into()))
+                    .await
+                    .unwrap();
+                let _ = frame_tx.send(msg);
+            }
+
+            // Drain so the connection stays open for the duration of the test.
+            while read.next().await.is_some() {}
+        });
+
+        let ws_url = format!("ws://127.0.0.1:{}/ws", addr.port());
+        let opts = ProtocolOptions {
+            binary: false,
+            compression: false,
+        };
+        let (_conn, mut events) = WsConnection::connect_with_tls(
+            &ws_url,
+            "tok",
+            opts,
+            false,
+            None,
+            1,
+            DEFAULT_MAX_PENDING_REQUESTS,
+        )
+        .await
+        .unwrap();
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), frame_rx)
+            .await
+            .expect("keepalive frame not sent within 3s")
+            .expect("frame channel closed");
+
+        match frame {
+            Message::Text(t) => assert_eq!(
+                t.as_str(),
+                "ping",
+                "keepalive must be the bare-string `ping`, not JSON-wrapped"
+            ),
+            Message::Ping(_) => panic!(
+                "WS Ping control frames are silently dropped by L7 proxies; \
+                 keepalive must be a Text data frame"
+            ),
+            other => panic!("unexpected keepalive frame: {other:?}"),
+        }
+
+        // The transactor's `{result:"ping"}` echo must NOT surface as a
+        // server-push event — otherwise every keepalive cycle would
+        // pollute the event channel and downstream consumers.
+        let drained =
+            tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await;
+        assert!(
+            drained.is_err(),
+            "ping echo must be filtered, not forwarded as event"
+        );
     }
 }

@@ -41,6 +41,37 @@ pub struct LoginInfo {
     pub token: Option<String>,
 }
 
+/// One entry returned by `getSocialIds`. Matches the upstream `SocialId`
+/// shape (huly.core/packages/account-client/src/types.ts) — only the
+/// fields the bridge needs are deserialized.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SocialId {
+    #[serde(rename = "_id")]
+    pub id: String,
+    /// `huly`, `email`, `google`, `github`, `oidc`. The transactor stamps
+    /// `modifiedBy` with the `huly`-type id when present (see
+    /// `pickPrimarySocialId` in huly.core/packages/core/src/utils.ts).
+    pub r#type: String,
+    #[serde(default)]
+    pub is_deleted: bool,
+}
+
+/// Pick the canonical `_id` to stamp on transactions, mirroring upstream
+/// `pickPrimarySocialId` in huly.core/packages/core/src/utils.ts: drop
+/// deleted entries, prefer the `huly`-type if present, otherwise return
+/// the first active entry. Returns `None` when no active entries remain.
+pub fn pick_primary_social_id(ids: &[SocialId]) -> Option<&SocialId> {
+    let active: Vec<&SocialId> = ids.iter().filter(|s| !s.is_deleted).collect();
+    if active.is_empty() {
+        return None;
+    }
+    active
+        .iter()
+        .find(|s| s.r#type == "huly")
+        .copied()
+        .or(active.first().copied())
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginTokenResponse {
     token: String,
@@ -165,8 +196,10 @@ impl AccountsClient {
     /// `WorkspaceLoginInfo` deserializer rejects.
     ///
     /// Self-hosted Huly omits `socialId` from `selectWorkspace` responses but
-    /// includes it here, so password-auth flows call this in addition to
-    /// `select_workspace` to capture the PersonId for transactions.
+    /// includes it here. **Note:** the `socialId` returned by this method is
+    /// the *login* identity (often `email`-type), not the canonical PersonId
+    /// the transactor expects on `modifiedBy`. Prefer `get_social_ids` +
+    /// `pick_primary_social_id` for tx attribution.
     pub async fn get_login_info(
         &self,
         token: &str,
@@ -174,6 +207,25 @@ impl AccountsClient {
         let body = json!({
             "method": "getLoginInfoByToken",
             "params": [],
+            "id": 1,
+        });
+        self.call(&body, Some(token)).await
+    }
+
+    /// JSON-RPC `getSocialIds({includeDeleted})` → list of all social
+    /// identities for the authenticated account. The transactor stamps
+    /// `modifiedBy` with the `huly`-type id from this list (see
+    /// `pickPrimarySocialId` in huly.core/packages/core/src/utils.ts);
+    /// the email-type id from `getLoginInfoByToken` is the login
+    /// identity, not the PersonId for tx attribution.
+    pub async fn get_social_ids(
+        &self,
+        token: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<SocialId>, AccountsError> {
+        let body = json!({
+            "method": "getSocialIds",
+            "params": {"includeDeleted": include_deleted},
             "id": 1,
         });
         self.call(&body, Some(token)).await
@@ -387,6 +439,96 @@ mod tests {
         assert_eq!(info.token, "ws-scoped-token");
         assert_eq!(info.workspace, "uuid-test-workspace");
         assert_eq!(info.social_id.as_deref(), Some("soc-token-flow"));
+    }
+
+    #[test]
+    fn pick_primary_social_id_prefers_huly_type() {
+        let ids = vec![
+            SocialId {
+                id: "email-id".into(),
+                r#type: "email".into(),
+                is_deleted: false,
+            },
+            SocialId {
+                id: "huly-id".into(),
+                r#type: "huly".into(),
+                is_deleted: false,
+            },
+        ];
+        assert_eq!(pick_primary_social_id(&ids).unwrap().id, "huly-id");
+    }
+
+    #[test]
+    fn pick_primary_social_id_skips_deleted_entries() {
+        let ids = vec![
+            SocialId {
+                id: "huly-deleted".into(),
+                r#type: "huly".into(),
+                is_deleted: true,
+            },
+            SocialId {
+                id: "email-active".into(),
+                r#type: "email".into(),
+                is_deleted: false,
+            },
+        ];
+        assert_eq!(pick_primary_social_id(&ids).unwrap().id, "email-active");
+    }
+
+    #[test]
+    fn pick_primary_social_id_returns_none_when_all_deleted() {
+        let ids = vec![SocialId {
+            id: "x".into(),
+            r#type: "huly".into(),
+            is_deleted: true,
+        }];
+        assert!(pick_primary_social_id(&ids).is_none());
+    }
+
+    #[test]
+    fn pick_primary_social_id_falls_back_to_first_active_when_no_huly_type() {
+        let ids = vec![
+            SocialId {
+                id: "github-id".into(),
+                r#type: "github".into(),
+                is_deleted: false,
+            },
+            SocialId {
+                id: "email-id".into(),
+                r#type: "email".into(),
+                is_deleted: false,
+            },
+        ];
+        assert_eq!(pick_primary_social_id(&ids).unwrap().id, "github-id");
+    }
+
+    #[tokio::test]
+    async fn get_social_ids_parses_response_array() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(json!({
+                "method": "getSocialIds",
+                "params": {"includeDeleted": false},
+                "id": 1,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 1,
+                "result": [
+                    {"_id": "1167144386167767041", "type": "email", "isDeleted": false,
+                     "key": "email:user@example.com", "value": "user@example.com"},
+                    {"_id": "1167144386200764417", "type": "huly", "isDeleted": false,
+                     "key": "huly:uuid", "value": "uuid"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let c = AccountsClient::new(server.uri());
+        let ids = c.get_social_ids("acct-token", false).await.unwrap();
+        assert_eq!(ids.len(), 2);
+        let primary = pick_primary_social_id(&ids).unwrap();
+        assert_eq!(primary.id, "1167144386200764417");
+        assert_eq!(primary.r#type, "huly");
     }
 
     #[tokio::test]

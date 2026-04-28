@@ -2,7 +2,7 @@ use crate::admin::health::HealthState;
 use crate::admin::metrics;
 use crate::admin::platform_api::PlatformClientHandle;
 use crate::admin::router::{AppState, create_router};
-use crate::bridge::announcer;
+use crate::bridge::announcer::{self, SocialIdHandle};
 use crate::bridge::event_loop;
 use crate::bridge::nats_publisher::{EventPublisher, NatsPublisher};
 use crate::config::{AuthConfig, BridgeConfig};
@@ -109,6 +109,9 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     info!(addr = %admin_addr, "admin API listening");
 
     let platform_client_handle: PlatformClientHandle = Arc::new(RwLock::new(None));
+    // Workspace social identity (PersonId) — populated after each successful
+    // connect; consumed by the announcer so MCP receives it via NATS discovery.
+    let social_id_handle: SocialIdHandle = Arc::new(RwLock::new(None));
 
     let admin_state = AppState {
         health: health.clone(),
@@ -147,6 +150,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let announcer_health = health.clone();
     let announcer_workspace = config.huly.workspace.clone();
     let announcer_proxy_url = config.admin.proxy_url();
+    let announcer_social_id = social_id_handle.clone();
     let announcer_handle = tokio::spawn(async move {
         announcer::run_announcer(
             nats_client_for_announcer,
@@ -154,6 +158,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             announcer_proxy_url,
             announcer_health,
             start_time,
+            announcer_social_id,
             announcer_cancel,
         )
         .await;
@@ -250,6 +255,9 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         *platform_client_handle
             .write()
             .expect("platform client handle poisoned") = Some(huly_client);
+        *social_id_handle
+            .write()
+            .expect("social id handle poisoned") = ws_login.social_id.clone();
 
         health.set_huly_connected(true);
         metrics::set_ws_connected(true);
@@ -294,6 +302,9 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
                 *platform_client_handle
                     .write()
                     .expect("platform client handle poisoned") = None;
+                *social_id_handle
+                    .write()
+                    .expect("social id handle poisoned") = None;
 
                 if cancel.is_cancelled() {
                     break;

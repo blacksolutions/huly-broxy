@@ -308,7 +308,17 @@ impl IntoResponse for ApiError {
                         c if c.contains("Unauthorized") => StatusCode::UNAUTHORIZED,
                         _ => StatusCode::UNPROCESSABLE_ENTITY,
                     };
-                    (status, message.clone())
+                    // Huly transactor frequently emits errors with a populated
+                    // `code` and an empty `message`. Falling through with the
+                    // empty string strands callers with a useless
+                    // `{"error":""}`; surface the code instead so they can act
+                    // on it (e.g. retry on `AccountMismatch`).
+                    let body = if message.trim().is_empty() {
+                        code.clone()
+                    } else {
+                        format!("{code}: {message}")
+                    };
+                    (status, body)
                 }
                 ClientError::Format(_) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
             },

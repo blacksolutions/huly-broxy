@@ -514,9 +514,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": 1,
                 "result": [
-                    {"_id": "1167144386167767041", "type": "email", "isDeleted": false,
+                    {"_id": "soc-email-1", "type": "email", "isDeleted": false,
                      "key": "email:user@example.com", "value": "user@example.com"},
-                    {"_id": "1167144386200764417", "type": "huly", "isDeleted": false,
+                    {"_id": "soc-huly-2", "type": "huly", "isDeleted": false,
                      "key": "huly:uuid", "value": "uuid"}
                 ]
             })))
@@ -527,7 +527,7 @@ mod tests {
         let ids = c.get_social_ids("acct-token", false).await.unwrap();
         assert_eq!(ids.len(), 2);
         let primary = pick_primary_social_id(&ids).unwrap();
-        assert_eq!(primary.id, "1167144386200764417");
+        assert_eq!(primary.id, "soc-huly-2");
         assert_eq!(primary.r#type, "huly");
     }
 
@@ -548,8 +548,8 @@ mod tests {
                 "id": 1,
                 "result": {
                     "account": "uuid-acct-1",
-                    "name": "Murat",
-                    "socialId": "1167144386167767041",
+                    "name": "Test User",
+                    "socialId": "soc-login",
                     "token": "acct-token",
                 }
             })))
@@ -559,7 +559,7 @@ mod tests {
         let c = AccountsClient::new(server.uri());
         let info = c.get_login_info("acct-token").await.unwrap();
         assert_eq!(info.account, "uuid-acct-1");
-        assert_eq!(info.social_id.as_deref(), Some("1167144386167767041"));
+        assert_eq!(info.social_id.as_deref(), Some("soc-login"));
     }
 
     #[tokio::test]

@@ -49,6 +49,7 @@ impl CardType {
         ]
     }
 
+    #[allow(dead_code)]
     pub fn from_name(name: &str) -> Option<CardType> {
         match name {
             "Module Spec" => Some(CardType::ModuleSpec),
@@ -89,6 +90,7 @@ impl IssueStatus {
         }
     }
 
+    #[allow(dead_code)]
     pub fn all() -> &'static [IssueStatus] {
         &[
             IssueStatus::Backlog,
@@ -261,6 +263,7 @@ impl Catalog {
             .expect("catalog initialized for all RelationType variants")
     }
 
+    #[allow(dead_code)]
     pub fn card_type_by_id(&self, id: &str) -> Option<CardType> {
         self.card_types
             .iter()
@@ -268,6 +271,7 @@ impl Catalog {
             .map(|(k, _)| *k)
     }
 
+    #[allow(dead_code)]
     pub fn relation_by_id(&self, id: &str) -> Option<RelationType> {
         self.relations
             .iter()

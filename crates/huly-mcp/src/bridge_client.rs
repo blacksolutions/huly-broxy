@@ -104,7 +104,7 @@ impl BridgeHttpClient {
     }
 
     /// POST /api/v1/add-collection. Returns the new doc id.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub async fn add_collection(
         &self,
         base_url: &str,

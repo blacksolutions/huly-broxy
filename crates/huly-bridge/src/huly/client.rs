@@ -149,6 +149,27 @@ impl HulyClient {
     }
 }
 
+/// The Huly transactor's `findAll` doesn't accept a bare-string `_id`
+/// equality predicate the way every other field does — passing
+/// `{"_id": "abc"}` returns a malformed response (`missing field _id`).
+/// The required shape is `{"_id": {"$in": ["abc"]}}`.
+///
+/// Auto-wrap top-level `_id` predicates so callers can write the obvious
+/// query and get the expected behavior. Any non-string value (already an
+/// operator object, `null`, an array) is passed through unchanged.
+fn normalize_query(mut query: Value) -> Value {
+    let Some(obj) = query.as_object_mut() else {
+        return query;
+    };
+    if let Some(id) = obj.get("_id")
+        && let Some(s) = id.as_str()
+    {
+        let s = s.to_string();
+        obj.insert("_id".into(), json!({ "$in": [s] }));
+    }
+    query
+}
+
 #[async_trait]
 impl PlatformClient for HulyClient {
     async fn find_all(
@@ -157,7 +178,7 @@ impl PlatformClient for HulyClient {
         query: Value,
         options: Option<FindOptions>,
     ) -> Result<FindResult, ClientError> {
-        let mut params = vec![json!(class), query];
+        let mut params = vec![json!(class), normalize_query(query)];
         if let Some(opts) = options {
             params.push(serde_json::to_value(opts).unwrap_or_default());
         }
@@ -494,6 +515,53 @@ mod tests {
         assert_eq!(result.docs.len(), 2);
         assert_eq!(result.docs[0].id, "i1");
         assert_eq!(result.docs[1].attributes["title"], "Feature");
+    }
+
+    /// Bare-string `_id` predicates are auto-wrapped to `$in` to work
+    /// around a transactor quirk that returns a malformed response for
+    /// the obvious `{"_id": "abc"}` form.
+    #[tokio::test]
+    async fn find_all_auto_wraps_bare_string_id_into_dollar_in() {
+        let mut mock = MockHulyConnection::new();
+        mock.expect_send_request()
+            .withf(|method, params| {
+                method == "findAll"
+                    && params.len() == 2
+                    && params[1] == json!({"_id": {"$in": ["doc-1"]}})
+            })
+            .returning(|_, _| {
+                Box::pin(async {
+                    Ok(mock_response(json!({
+                        "docs": [{"_id": "doc-1", "_class": "cls"}],
+                        "total": 1,
+                    })))
+                })
+            });
+
+        let client = HulyClient::new(Arc::new(mock));
+        let result = client
+            .find_all("cls", json!({"_id": "doc-1"}), None)
+            .await
+            .unwrap();
+        assert_eq!(result.docs[0].id, "doc-1");
+    }
+
+    /// Operator-object `_id` predicates pass through unchanged so callers
+    /// retain access to `$ne`, `$exists`, etc.
+    #[tokio::test]
+    async fn find_all_passes_through_operator_id_predicate() {
+        let mut mock = MockHulyConnection::new();
+        mock.expect_send_request()
+            .withf(|_, params| params[1] == json!({"_id": {"$ne": "doc-1"}}))
+            .returning(|_, _| {
+                Box::pin(async { Ok(mock_response(json!({"docs": [], "total": 0}))) })
+            });
+
+        let client = HulyClient::new(Arc::new(mock));
+        let _ = client
+            .find_all("cls", json!({"_id": {"$ne": "doc-1"}}), None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

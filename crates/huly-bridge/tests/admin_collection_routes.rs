@@ -127,13 +127,19 @@ impl PlatformClient for FakeClient {
 }
 
 fn build_state(client: Arc<FakeClient>) -> AppState {
+    use huly_bridge::admin::platform_api::PlatformClientHandle;
+    use huly_bridge::huly::client::PlatformClient;
     use huly_bridge::service::workspace_token::WorkspaceTokenCache;
-    let handle = PrometheusBuilder::new().build_recorder().handle();
+    use std::sync::RwLock;
+    let metrics = PrometheusBuilder::new().build_recorder().handle();
+    let platform_handle: PlatformClientHandle = Arc::new(RwLock::new(Some(
+        client as Arc<dyn PlatformClient>,
+    )));
     AppState {
         health: HealthState::new(),
-        metrics_handle: Arc::new(handle),
+        metrics_handle: Arc::new(metrics),
         start_time: Instant::now(),
-        platform_client: Some(client),
+        platform_client: platform_handle,
         api_token: Some(SecretString::from("test-token")),
         collaborator_client: None,
         workspace_token_cache: WorkspaceTokenCache::new(),

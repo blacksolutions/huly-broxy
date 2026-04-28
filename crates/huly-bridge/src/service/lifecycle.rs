@@ -1,5 +1,6 @@
 use crate::admin::health::HealthState;
 use crate::admin::metrics;
+use crate::admin::platform_api::PlatformClientHandle;
 use crate::admin::router::{AppState, create_router};
 use crate::bridge::announcer;
 use crate::bridge::event_loop;
@@ -7,14 +8,15 @@ use crate::bridge::nats_publisher::{EventPublisher, NatsPublisher};
 use crate::config::{AuthConfig, BridgeConfig};
 use crate::huly::accounts::{AccountsClient, AccountsError, WorkspaceLoginInfo};
 use crate::huly::auth;
+use crate::huly::client::{HulyClient, PlatformClient};
 use crate::huly::collaborator::CollaboratorClient;
-use crate::huly::connection::WsConnection;
+use crate::huly::connection::{HulyConnection, WsConnection};
 use crate::huly::rest::{self, RestClient, ServerConfigCache};
 use crate::huly::rpc::ProtocolOptions;
 use crate::service::watchdog;
 use crate::service::workspace_token::WorkspaceTokenCache;
 use secrecy::SecretString;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -98,17 +100,21 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let publisher = Arc::new(publisher) as Arc<dyn EventPublisher>;
     let publisher_ref = publisher.clone();
 
-    // Start admin API server (without platform client initially — added on first connect)
+    // Start admin API server. Platform routes are mounted unconditionally;
+    // the handle starts empty and is populated on first WS connect (handlers
+    // return 503 in the meantime).
     let metrics_handle = Arc::new(metrics_handle);
     let admin_addr = format!("{}:{}", config.admin.host, config.admin.port);
     let admin_listener = TcpListener::bind(&admin_addr).await?;
     info!(addr = %admin_addr, "admin API listening");
 
+    let platform_client_handle: PlatformClientHandle = Arc::new(RwLock::new(None));
+
     let admin_state = AppState {
         health: health.clone(),
         metrics_handle: metrics_handle.clone(),
         start_time,
-        platform_client: None,
+        platform_client: platform_client_handle.clone(),
         api_token: config.admin.api_token.clone(),
         collaborator_client: collaborator_client.clone(),
         workspace_token_cache: workspace_token_cache.clone(),
@@ -211,7 +217,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             workspace = %ws_login.workspace,
             "connecting to Huly WebSocket..."
         );
-        let (_conn, events) = match WsConnection::connect_with_tls(
+        let (conn, events) = match WsConnection::connect_with_tls(
             &ws_login.endpoint,
             &ws_login.token,
             protocol,
@@ -235,6 +241,15 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
                 continue;
             }
         };
+
+        // Hot-swap the platform client into the admin handle. Holding the only
+        // strong ref here means dropping the handle entry on disconnect runs
+        // WsConnection::Drop and aborts the read/write/ping tasks.
+        let conn_arc: Arc<dyn HulyConnection> = Arc::new(conn);
+        let huly_client: Arc<dyn PlatformClient> = Arc::new(HulyClient::new(conn_arc));
+        *platform_client_handle
+            .write()
+            .expect("platform client handle poisoned") = Some(huly_client);
 
         health.set_huly_connected(true);
         metrics::set_ws_connected(true);
@@ -274,6 +289,11 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
                 // Connection dropped — update health and try reconnect
                 health.set_huly_connected(false);
                 metrics::set_ws_connected(false);
+                // Clear the platform handle so admin handlers go back to 503
+                // until the next successful connect.
+                *platform_client_handle
+                    .write()
+                    .expect("platform client handle poisoned") = None;
 
                 if cancel.is_cancelled() {
                     break;

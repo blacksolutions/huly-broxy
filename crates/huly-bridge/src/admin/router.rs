@@ -1,6 +1,5 @@
 use crate::admin::health::HealthState;
-use crate::admin::platform_api::{self, MarkupState, PlatformState};
-use crate::huly::client::PlatformClient;
+use crate::admin::platform_api::{self, MarkupState, PlatformClientHandle, PlatformState};
 use crate::huly::collaborator::CollaboratorClient;
 use crate::service::workspace_token::WorkspaceTokenCache;
 use axum::{
@@ -22,7 +21,9 @@ pub struct AppState {
     pub health: HealthState,
     pub metrics_handle: Arc<PrometheusHandle>,
     pub start_time: Instant,
-    pub platform_client: Option<Arc<dyn PlatformClient>>,
+    /// Hot-swappable platform client handle. Empty until the first successful
+    /// Huly WS connect; handlers return 503 while empty.
+    pub platform_client: PlatformClientHandle,
     pub api_token: Option<SecretString>,
     /// Collaborator client — `None` if `COLLABORATOR_URL` was not advertised by the server.
     pub collaborator_client: Option<CollaboratorClient>,
@@ -98,9 +99,12 @@ pub fn create_router(state: AppState) -> Router {
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    // Add platform API routes if a client is available
-    if let Some(client) = state.platform_client.clone() {
-        let platform_state = PlatformState { client };
+    // Platform routes are always mounted; handlers return 503 until the first
+    // successful WS connect populates the handle (and again after disconnect).
+    {
+        let platform_state = PlatformState {
+            handle: state.platform_client.clone(),
+        };
         let platform_routes = Router::new()
             .route("/api/v1/find", post(platform_api::find))
             .route("/api/v1/find-one", post(platform_api::find_one))
@@ -187,7 +191,7 @@ mod tests {
             health: HealthState::new(),
             metrics_handle: Arc::new(handle),
             start_time: Instant::now(),
-            platform_client: None,
+            platform_client: Arc::new(std::sync::RwLock::new(None)),
             api_token: None,
             collaborator_client: None,
             workspace_token_cache: WorkspaceTokenCache::new(),
@@ -251,7 +255,7 @@ mod tests {
             health: HealthState::new(),
             metrics_handle: Arc::new(handle),
             start_time: Instant::now(),
-            platform_client: None,
+            platform_client: Arc::new(std::sync::RwLock::new(None)),
             api_token: Some(SecretString::from(token)),
             collaborator_client: None,
             workspace_token_cache: WorkspaceTokenCache::new(),
@@ -346,5 +350,23 @@ mod tests {
         assert!(!json["nats_connected"].as_bool().unwrap());
         assert!(!json["ready"].as_bool().unwrap());
         assert!(json["uptime_secs"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn platform_routes_return_503_when_handle_empty() {
+        // Routes are always mounted; an empty handle yields 503 instead of 404.
+        let state = test_state_with_token("secret");
+        let app = create_router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/v1/find")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"class":"tracker:class:Project","query":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

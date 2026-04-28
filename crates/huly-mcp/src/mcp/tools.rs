@@ -440,6 +440,7 @@ pub async fn create_issue_in_project(
     status: IssueStatus,
     priority: u8,
     component: Option<&str>,
+    modified_by: &str,
 ) -> Result<(String, String), String> {
     const MAX_RETRIES: u32 = 5;
     const BACKOFF_BASE_MS: u64 = 10;
@@ -494,6 +495,7 @@ pub async fn create_issue_in_project(
             &project.id,
             "tracker:class:Project",
             &project.id,
+            modified_by,
             json!({ "$inc": { "sequence": 1 } }),
         );
 
@@ -505,6 +507,7 @@ pub async fn create_issue_in_project(
             NO_PARENT,
             "tracker:class:Issue",
             "subIssues",
+            modified_by,
             attrs,
         );
 
@@ -693,6 +696,7 @@ pub async fn create_component(
     project: &Doc,
     label: &str,
     description: &str,
+    modified_by: &str,
 ) -> Result<ComponentResult, String> {
     let scope = format!("tracker:project:{}:component-create:{}", project.id, label);
     let component_id = gen_tx_id();
@@ -705,6 +709,7 @@ pub async fn create_component(
         &component_id,
         "tracker:class:Component",
         &project.id,
+        modified_by,
         attrs,
     );
     let not_matches = vec![ApplyIfMatch {
@@ -764,6 +769,7 @@ pub async fn link_issue_to_card(
     issue_identifier: &str,
     card_id: &str,
     rel_type: RelationType,
+    modified_by: &str,
 ) -> Result<LinkResult, String> {
     let issue_res = http
         .find(
@@ -790,7 +796,7 @@ pub async fn link_issue_to_card(
         "docB": card_id,
         "association": assoc_id,
     });
-    let tx_create = tx_create_doc(&rel_id, "core:class:Relation", MODEL_SPACE, attrs);
+    let tx_create = tx_create_doc(&rel_id, "core:class:Relation", MODEL_SPACE, modified_by, attrs);
     let not_matches = vec![ApplyIfMatch {
         class: "core:class:Relation".into(),
         query: json!({

@@ -157,6 +157,7 @@ mod tests {
             uptime_secs: 100,
             version: "0.1.0".into(),
             timestamp: 1700000000000,
+            social_id: None,
         };
 
         registry.update(ann).await;
@@ -186,6 +187,7 @@ mod tests {
                     uptime_secs: 0,
                     version: "0.1.0".into(),
                     timestamp: 0,
+                    social_id: None,
                 })
                 .await;
         }
@@ -207,6 +209,7 @@ mod tests {
                 uptime_secs: 0,
                 version: "0.1.0".into(),
                 timestamp: 0,
+                social_id: None,
             })
             .await;
 
@@ -229,6 +232,7 @@ mod tests {
             uptime_secs: 0,
             version: "0.1.0".into(),
             timestamp: 0,
+            social_id: None,
         };
 
         registry.update(ann.clone()).await;

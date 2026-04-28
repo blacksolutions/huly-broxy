@@ -6,7 +6,7 @@ use crate::bridge::announcer::{self, SocialIdHandle};
 use crate::bridge::event_loop;
 use crate::bridge::nats_publisher::{EventPublisher, NatsPublisher};
 use crate::config::{AuthConfig, BridgeConfig};
-use crate::huly::accounts::{AccountsClient, AccountsError, WorkspaceLoginInfo};
+use crate::huly::accounts::{AccountsClient, AccountsError, WorkspaceLoginInfo, pick_primary_social_id};
 use crate::huly::auth;
 use crate::huly::client::{HulyClient, PlatformClient};
 use crate::huly::collaborator::CollaboratorClient;
@@ -393,18 +393,29 @@ async fn resolve_workspace(
             accounts.select_workspace(account_token, workspace_slug).await?
         }
     };
-    if info.social_id.is_none() {
-        match accounts.get_login_info(account_token).await {
-            Ok(login) => {
-                info.social_id = login.social_id;
+    // Prefer `getSocialIds` + `pickPrimarySocialId` — that's what the official
+    // upstream client uses for `modifiedBy` (api-client/src/client.ts:74). The
+    // login-time `socialId` is the *login* identity (often email-type), which
+    // the transactor rejects with `AccountMismatch` when stamped on a tx.
+    match accounts.get_social_ids(account_token, false).await {
+        Ok(ids) => {
+            if let Some(primary) = pick_primary_social_id(&ids) {
+                info.social_id = Some(primary.id.clone());
+            } else {
+                tracing::warn!("getSocialIds returned no active entries; tx attribution will fall back to core:account:System");
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "fetching socialId from getLoginInfoByToken failed; \
-                     transactions will be stamped with core:account:System and \
-                     rejected by the transactor as AccountMismatch"
-                );
+        }
+        Err(e) => {
+            // Older accounts servers may not implement getSocialIds; back-fill
+            // best-effort from getLoginInfoByToken so we at least carry *some*
+            // identity rather than nothing. The login identity won't satisfy
+            // the transactor's check but downstream consumers see the chain
+            // is wired up.
+            tracing::warn!(error = %e, "getSocialIds unavailable; falling back to getLoginInfoByToken");
+            if info.social_id.is_none()
+                && let Ok(login) = accounts.get_login_info(account_token).await
+            {
+                info.social_id = login.social_id;
             }
         }
     }

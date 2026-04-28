@@ -1,0 +1,32 @@
+{
+  "id": 1,
+  "result": {
+    "_class": "core:class:FindResult",
+    "total": 2,
+    "lookupMap": {},
+    "docs": [
+      {
+        "_id": "doc:0001",
+        "_class": "core:class:Doc",
+        "space": "space:general",
+        "modifiedOn": 1717000000000,
+        "modifiedBy": "acc-uuid-0001",
+        "createdOn": 1717000000000,
+        "createdBy": "acc-uuid-0001",
+        "title": "Welcome",
+        "content": "First doc"
+      },
+      {
+        "_id": "doc:0002",
+        "_class": "core:class:Doc",
+        "space": "space:general",
+        "modifiedOn": 1717000005000,
+        "modifiedBy": "acc-uuid-0001",
+        "createdOn": 1717000005000,
+        "createdBy": "acc-uuid-0001",
+        "title": "Second",
+        "content": "Another doc"
+      }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+[nats]
+url = "nats://127.0.0.1:4222"
+# credentials = "/path/to/nats.creds"
+
+[mcp]
+# How long (seconds) before a bridge is considered stale and removed
+stale_timeout_secs = 30
+# Bearer token for authenticating with bridge /api/v1/* endpoints.
+# Must match the bridge's admin.api_token value.
+bridge_api_token = "your-shared-secret"
+
+[log]
+level = "info"
+json = false
+
+# Optional: enables huly_sync_status and huly_sync_cards MCP tools, which
+# shell out to the upstream Node.js sync pipeline. Omit this whole section to
+# disable those tools (they will return a configuration error if invoked).
+# [mcp.sync]
+# script_path = "/path/to/huly-api/packages/sync/dist/index.js"
+# node_binary = "node"      # default
+# working_dir = "."         # affects .huly-sync-state.json + docs/ resolution
+# timeout_secs = 300        # kill subprocess if it exceeds this many seconds
+
+# Optional: override catalog IDs for non-Muhasebot deployments. Defaults ship
+# with Muhasebot card-type and relation IDs; if your workspace uses different
+# ones, look them up via the `huly_discover` tool and map them here.
+#
+# Valid card-type keys: "Module Spec", "Data Entity", "Business Flow",
+#   "Compliance Item", "Product Decision", "Jurisdiction"
+# Valid relation keys: "module", "entity", "flow", "compliance", "decision"
+#
+# Unknown keys are silently ignored but logged as a `warn!` at startup — watch
+# the log for "[mcp.catalog] override(s) reference unknown names" to catch typos.
+# [mcp.catalog.card_types]
+# "Module Spec" = "your-module-spec-card-id"
+# [mcp.catalog.relations]
+# "module" = "your-module-relation-id"

@@ -1,0 +1,76 @@
+[package]
+name = "huly-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Huly.io Bridge Server - API proxy and event forwarder"
+
+[dependencies]
+huly-common = { path = "../huly-common" }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# HTTP server (admin API)
+axum = { version = "0.8", features = ["ws"] }
+
+# HTTP client (Huly REST proxy)
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls", "charset", "http2"] }
+
+# WebSocket client (Huly connection)
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+# TLS (rustls — pure Rust, cross-platform)
+rustls = "0.23"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+# NATS message queue
+async-nats = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = "1"
+
+# Compression (snappy - matches Huly's snappyjs)
+snap = "1"
+
+# Configuration
+toml = { workspace = true }
+clap = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Secret management
+secrecy = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Async trait
+async-trait = { workspace = true }
+
+# Futures utilities
+futures = "0.3"
+
+# Markdown → ProseMirror conversion
+pulldown-cmark = "0.12"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = "0.4"
+
+[dev-dependencies]
+mockall = "0.13"
+wiremock = "0.6"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

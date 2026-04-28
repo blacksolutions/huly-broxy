@@ -1,0 +1,20 @@
+{
+  "id": -1,
+  "result": {
+    "event": "tx",
+    "data": {
+      "_id": "tx:0001",
+      "_class": "core:class:TxCreateDoc",
+      "space": "space:tx",
+      "modifiedOn": 1717000010000,
+      "modifiedBy": "acc-uuid-0001",
+      "objectId": "doc:0003",
+      "objectClass": "core:class:Doc",
+      "objectSpace": "space:general",
+      "attributes": {
+        "title": "Pushed",
+        "content": "Server-pushed tx"
+      }
+    }
+  }
+}

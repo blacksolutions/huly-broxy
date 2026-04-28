@@ -1,0 +1,20 @@
+[Unit]
+Description=NATS Server (Podman)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=docker.io/library/nats:2.11-alpine
+ContainerName=nats
+PublishPort=127.0.0.1:4222:4222
+PublishPort=127.0.0.1:8222:8222
+Volume=/var/lib/nats/data:/data:Z,U
+Exec=-js -sd /data -m 8222
+AutoUpdate=registry
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

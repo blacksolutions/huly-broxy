@@ -1,0 +1,49 @@
+[huly]
+url = "https://huly.example.com"
+# For token auth this slug is informational only — the JWT's workspace claim wins
+# (bridge calls `getLoginInfoByToken`). For password auth this slug selects the
+# workspace via `selectWorkspace`.
+workspace = "your-workspace"
+# Accounts service base URL. If unset, defaults to `{url}/api/v1/accounts` (legacy).
+# For Huly Cloud / self-hosted with path routing, fetch `{url}/config.json` and use
+# its ACCOUNTS_URL field. The bridge calls accounts.selectWorkspace to discover the
+# transactor WebSocket endpoint — connecting directly to `{url}/{workspace}` will hit
+# the front SPA and return HTTP 200 instead of a WS upgrade.
+accounts_url = "https://huly.example.com/_accounts"
+use_binary_protocol = false
+use_compression = true
+reconnect_delay_ms = 1000
+ping_interval_secs = 10
+
+# Password authentication — full login→selectWorkspace flow creates a
+# server-side session that the transactor requires. Token auth bypasses
+# session creation and gets rejected with "invalid token".
+[huly.auth]
+method = "password"
+email = "user@example.com"
+password = "REPLACE_ME"
+
+# Or use token-based authentication:
+# [huly.auth]
+# method = "token"
+# token = "your-jwt-here"
+
+[nats]
+url = "nats://127.0.0.1:4222"
+subject_prefix = "huly"
+# credentials = "/path/to/nats.creds"
+
+[admin]
+host = "0.0.0.0"
+# 9090 collides with Cockpit on Fedora. 9095 is unassigned by common services.
+port = 9095
+# URL to advertise in NATS announcements for MCP discovery.
+# If not set, constructed from host:port.
+# advertise_url = "http://10.0.0.5:9095"
+# Bearer token for /api/v1/* endpoints. Required — without it, API returns 403.
+# Must match mcp.bridge_api_token in the MCP config.
+api_token = "change-me"
+
+[log]
+level = "info"
+json = false

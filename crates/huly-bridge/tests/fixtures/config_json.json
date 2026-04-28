@@ -1,0 +1,8 @@
+{
+  "ACCOUNTS_URL": "https://account.example.com",
+  "COLLABORATOR_URL": "wss://collaborator.example.com",
+  "FILES_URL": "https://files.example.com",
+  "UPLOAD_URL": "https://upload.example.com",
+  "FRONT_URL": "https://app.example.com",
+  "PUSH_PUBLIC_KEY": "BPLACEHOLDERPUBKEY"
+}

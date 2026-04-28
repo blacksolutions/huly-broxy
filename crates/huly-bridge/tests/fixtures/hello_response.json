@@ -1,0 +1,15 @@
+{
+  "id": -1,
+  "binary": true,
+  "compression": true,
+  "useCompression": true,
+  "serverVersion": "0.7.19",
+  "lastTx": "tx:6661a1b2c3d4e5f60718293a",
+  "lastHash": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "account": {
+    "uuid": "acc-uuid-0001",
+    "role": "OWNER",
+    "primarySocialId": "social:huly:0001",
+    "socialIds": ["social:huly:0001", "social:github:0001"]
+  }
+}

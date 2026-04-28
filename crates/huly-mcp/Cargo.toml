@@ -1,0 +1,52 @@
+[package]
+name = "huly-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Huly MCP Server - Model Context Protocol server for Huly bridge"
+
+[dependencies]
+huly-common = { path = "../huly-common" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# MCP protocol
+rmcp = { version = "1.3", features = ["transport-io", "server", "macros"] }
+schemars = "1.2"
+
+# NATS for bridge discovery
+async-nats = { workspace = true }
+
+# HTTP client for bridge REST API
+reqwest = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Configuration
+toml = { workspace = true }
+clap = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Secret management
+secrecy = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Async trait
+async-trait = { workspace = true }
+
+# Utilities
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+
+[dev-dependencies]
+wiremock = "0.6"

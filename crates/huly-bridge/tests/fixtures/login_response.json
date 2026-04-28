@@ -1,0 +1,18 @@
+{
+  "result": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhY2MtdXVpZC0wMDAxIiwid3MiOiJ3cy11dWlkLTAwMDEifQ.signature",
+    "endpoint": "wss://transactor.example.com",
+    "email": "alice@example.com",
+    "account": {
+      "uuid": "acc-uuid-0001",
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Example"
+    },
+    "workspace": {
+      "uuid": "ws-uuid-0001",
+      "name": "alice-workspace",
+      "url": "alice-workspace"
+    }
+  }
+}

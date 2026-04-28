@@ -158,6 +158,27 @@ impl AccountsClient {
         self.call(&body, Some(token)).await
     }
 
+    /// JSON-RPC `getLoginInfoByToken()` parsed as `LoginInfo` rather than
+    /// `WorkspaceLoginInfo`. Useful when the supplied token is account-scoped
+    /// (no workspace claim) — the server returns `{account, name, socialId,
+    /// token}` without `endpoint`/`workspace`, which the wider
+    /// `WorkspaceLoginInfo` deserializer rejects.
+    ///
+    /// Self-hosted Huly omits `socialId` from `selectWorkspace` responses but
+    /// includes it here, so password-auth flows call this in addition to
+    /// `select_workspace` to capture the PersonId for transactions.
+    pub async fn get_login_info(
+        &self,
+        token: &str,
+    ) -> Result<LoginInfo, AccountsError> {
+        let body = json!({
+            "method": "getLoginInfoByToken",
+            "params": [],
+            "id": 1,
+        });
+        self.call(&body, Some(token)).await
+    }
+
     async fn call<T: for<'de> Deserialize<'de>>(
         &self,
         body: &serde_json::Value,
@@ -366,6 +387,37 @@ mod tests {
         assert_eq!(info.token, "ws-scoped-token");
         assert_eq!(info.workspace, "uuid-test-workspace");
         assert_eq!(info.social_id.as_deref(), Some("soc-token-flow"));
+    }
+
+    #[tokio::test]
+    async fn get_login_info_returns_social_id_for_account_token() {
+        // Self-hosted Huly returns LoginInfo (not WorkspaceLoginInfo) when
+        // `getLoginInfoByToken` is called with an account-scoped token.
+        // The bridge needs this path to capture socialId, since
+        // selectWorkspace omits it on this deployment.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(json!({
+                "method": "getLoginInfoByToken",
+                "params": [],
+                "id": 1,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 1,
+                "result": {
+                    "account": "uuid-acct-1",
+                    "name": "Murat",
+                    "socialId": "1167144386167767041",
+                    "token": "acct-token",
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let c = AccountsClient::new(server.uri());
+        let info = c.get_login_info("acct-token").await.unwrap();
+        assert_eq!(info.account, "uuid-acct-1");
+        assert_eq!(info.social_id.as_deref(), Some("1167144386167767041"));
     }
 
     #[tokio::test]

@@ -374,18 +374,41 @@ fn to_ws_scheme(url: &str) -> String {
 ///
 /// For **password auth** there is no workspace claim in the freshly-issued account
 /// token, so the slug-driven `selectWorkspace` call is the only option.
+///
+/// Self-hosted Huly omits `socialId` from `selectWorkspace` (and sometimes
+/// `getLoginInfoByToken`) responses; if the primary call yielded none, fetch
+/// it best-effort via the account-token-scoped `getLoginInfoByToken` and
+/// merge it in. Failure is non-fatal — consumers fall back to
+/// `core:account:System` and surface `AccountMismatch` rather than silently
+/// writing under the wrong identity.
 async fn resolve_workspace(
     accounts: &AccountsClient,
     auth: &AuthConfig,
     account_token: &str,
     workspace_slug: &str,
 ) -> Result<WorkspaceLoginInfo, AccountsError> {
-    match auth {
-        AuthConfig::Token { .. } => accounts.get_login_info_by_token(account_token).await,
+    let mut info = match auth {
+        AuthConfig::Token { .. } => accounts.get_login_info_by_token(account_token).await?,
         AuthConfig::Password { .. } => {
-            accounts.select_workspace(account_token, workspace_slug).await
+            accounts.select_workspace(account_token, workspace_slug).await?
+        }
+    };
+    if info.social_id.is_none() {
+        match accounts.get_login_info(account_token).await {
+            Ok(login) => {
+                info.social_id = login.social_id;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "fetching socialId from getLoginInfoByToken failed; \
+                     transactions will be stamped with core:account:System and \
+                     rejected by the transactor as AccountMismatch"
+                );
+            }
         }
     }
+    Ok(info)
 }
 
 #[cfg(unix)]

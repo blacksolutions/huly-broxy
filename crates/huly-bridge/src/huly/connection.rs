@@ -412,16 +412,16 @@ impl WsConnection {
     }
 
     async fn send_raw(&self, request: &RpcRequest) -> Result<RpcResponse, ConnectionError> {
-        let data = serialize(request, self.protocol)?;
-
+        // The negotiated `compression` flag controls **response** compression
+        // (server→client). Outgoing JSON requests always travel uncompressed
+        // inside a Text frame; only `binary=true` (msgpack) sends Binary, in
+        // which case `serialize` applies snappy when compression is also on.
         let msg = if self.protocol.binary {
-            Message::Binary(data.into())
+            Message::Binary(serialize(request, self.protocol)?.into())
         } else {
-            let text = String::from_utf8(data)
-                .map_err(|e| ConnectionError::Serialization(SerializeError::Json(
-                    serde_json::Error::io(std::io::Error::other(e)),
-                )))?;
-            Message::Text(text.into())
+            let json = serde_json::to_string(request)
+                .map_err(|e| ConnectionError::Serialization(SerializeError::Json(e)))?;
+            Message::Text(json.into())
         };
 
         let (tx, rx) = oneshot::channel();
@@ -1096,5 +1096,66 @@ mod tests {
     fn text_prefix_truncates_by_chars_not_bytes() {
         assert_eq!(text_prefix("héllo", 3), "hél");
         assert_eq!(text_prefix("short", 100), "short");
+    }
+
+    /// Regression: outgoing JSON requests must travel as **Text frames** even
+    /// when `compression=true` is negotiated. The `compression` flag only
+    /// applies to server→client response payloads — the client never compresses
+    /// outgoing requests. A prior version snappy-encoded the request and
+    /// either failed `String::from_utf8` (-> 502 immediately) or, after a
+    /// well-meant "fix", shipped snappy bytes in a Binary frame that the Huly
+    /// transactor silently dropped (-> 60s request timeout).
+    #[tokio::test]
+    async fn send_raw_uses_text_frame_with_uncompressed_json_when_not_binary() {
+        use tokio::sync::oneshot;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (frame_tx, frame_rx) = oneshot::channel::<Message>();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws_stream.split();
+
+            // Hello (always Text).
+            if let Some(Ok(Message::Text(text))) = read.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_i64().unwrap();
+                let hello_resp =
+                    serde_json::json!({"id": id, "binary": false, "compression": true});
+                write
+                    .send(Message::Text(hello_resp.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+
+            // Capture the next frame (the request under test) so the test can
+            // assert on its variant + payload.
+            if let Some(Ok(msg)) = read.next().await {
+                let _ = frame_tx.send(msg);
+            }
+        });
+
+        let ws_url = format!("ws://127.0.0.1:{}/ws", addr.port());
+        let opts = ProtocolOptions {
+            binary: false,
+            compression: true,
+        };
+        let (mut conn, _events) = WsConnection::connect(&ws_url, "tok", opts).await.unwrap();
+        conn.set_request_timeout(std::time::Duration::from_millis(200));
+
+        let _ = conn.send_request("findAll", vec![]).await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), frame_rx)
+            .await
+            .expect("frame not received before timeout")
+            .expect("frame channel closed");
+        match frame {
+            Message::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                assert_eq!(v["method"], "findAll", "request body parsed as JSON");
+            }
+            other => panic!("non-binary mode must emit a Text frame, got {other:?}"),
+        }
     }
 }

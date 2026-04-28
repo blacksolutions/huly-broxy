@@ -279,6 +279,31 @@ impl HulyMcpServer {
         let ws = tools::resolve_workspace(&self.registry, workspace).await?;
         self.resolve_proxy_url(&ws).await
     }
+
+    /// Same workspace resolution as `resolve_optional_workspace`, plus the
+    /// announced `socialId` to stamp on transactions. Falls back to
+    /// `SYSTEM_ACCOUNT` if the bridge has not announced one yet — a real
+    /// transactor will reject that with `AccountMismatch`, which is
+    /// preferable to silently writing under the wrong identity.
+    async fn resolve_proxy_and_modified_by(
+        &self,
+        workspace: Option<&str>,
+    ) -> Result<(String, String), String> {
+        let ws = tools::resolve_workspace(&self.registry, workspace).await?;
+        let ann = self
+            .registry
+            .get(&ws)
+            .await
+            .ok_or_else(|| format!("workspace '{ws}' not found. Use huly_list_workspaces to see available workspaces."))?;
+        if !ann.ready {
+            return Err(format!("bridge for workspace '{ws}' is not ready"));
+        }
+        validate_proxy_url(&ann.proxy_url)?;
+        let modified_by = ann
+            .social_id
+            .unwrap_or_else(|| crate::txcud::SYSTEM_ACCOUNT.to_string());
+        Ok((ann.proxy_url, modified_by))
+    }
 }
 
 /// Validates that a proxy URL uses an allowed scheme (http or https only).
@@ -483,10 +508,11 @@ impl HulyMcpServer {
         description = "Create a new tracker issue. Accepts markdown in 'description' — it is uploaded to the Huly collaborator service so it renders correctly in the UI. If 'project' is omitted, the only project in the workspace is used (errors if multiple)."
     )]
     async fn create_issue(&self, Parameters(params): Parameters<CreateIssueParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+        let (proxy_url, modified_by) =
+            match self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
         let project = match tools::resolve_project(&self.http_client, &proxy_url, params.project.as_deref()).await {
             Ok(p) => p,
             Err(e) => return e,
@@ -505,6 +531,7 @@ impl HulyMcpServer {
             params.status,
             params.priority,
             params.component.as_deref(),
+            &modified_by,
         )
         .await
         {
@@ -603,10 +630,11 @@ impl HulyMcpServer {
         description = "Create a tracker component in a project. Skips creation if a component with the same label already exists."
     )]
     async fn create_component(&self, Parameters(params): Parameters<CreateComponentParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+        let (proxy_url, modified_by) =
+            match self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
         let project = match tools::resolve_project(&self.http_client, &proxy_url, params.project.as_deref()).await {
             Ok(p) => p,
             Err(e) => return e,
@@ -617,6 +645,7 @@ impl HulyMcpServer {
             &project,
             &params.label,
             &params.description,
+            &modified_by,
         )
         .await
         {
@@ -636,10 +665,11 @@ impl HulyMcpServer {
         description = "Link an issue to a card via a relation (module / entity / flow / compliance / decision). Relation IDs default to Muhasebot; override via [mcp.catalog.relations] config."
     )]
     async fn link_issue_to_card(&self, Parameters(params): Parameters<LinkIssueToCardParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+        let (proxy_url, modified_by) =
+            match self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
         let issue_ident = params.issue_identifier.clone();
         let card_id = params.card_id.clone();
         let rel_label = params.relation_type.name();
@@ -650,6 +680,7 @@ impl HulyMcpServer {
             &issue_ident,
             &card_id,
             params.relation_type,
+            &modified_by,
         )
         .await
         {
@@ -763,6 +794,7 @@ mod tests {
             uptime_secs: 0,
             version: "0.1.0".into(),
             timestamp: 0,
+            social_id: None,
         }
     }
 
@@ -808,6 +840,39 @@ mod tests {
         let server = make_server(registry);
         let err = server.resolve_proxy_url("missing").await.unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn resolve_proxy_and_modified_by_uses_announced_social_id() {
+        let registry = BridgeRegistry::new();
+        let mut ann = make_announcement("ws1", "http://bridge:9090", true);
+        ann.social_id = Some("soc-real-person".into());
+        registry.update(ann).await;
+        let server = make_server(registry);
+        let (proxy, modified_by) = server
+            .resolve_proxy_and_modified_by(Some("ws1"))
+            .await
+            .unwrap();
+        assert_eq!(proxy, "http://bridge:9090");
+        assert_eq!(modified_by, "soc-real-person");
+    }
+
+    #[tokio::test]
+    async fn resolve_proxy_and_modified_by_falls_back_to_system_when_unannounced() {
+        // A bridge that hasn't yet announced a socialId (start-up race,
+        // older bridge version) yields the SYSTEM_ACCOUNT fallback. Real
+        // transactors reject this with AccountMismatch — preferable to
+        // silently writing under the wrong identity.
+        let registry = BridgeRegistry::new();
+        registry
+            .update(make_announcement("ws1", "http://bridge:9090", true))
+            .await;
+        let server = make_server(registry);
+        let (_proxy, modified_by) = server
+            .resolve_proxy_and_modified_by(Some("ws1"))
+            .await
+            .unwrap();
+        assert_eq!(modified_by, crate::txcud::SYSTEM_ACCOUNT);
     }
 
     #[tokio::test]

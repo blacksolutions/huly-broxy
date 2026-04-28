@@ -11,6 +11,10 @@ pub type ClassRef = String;
 pub type SpaceRef = String;
 
 /// Generic document from Huly
+///
+/// `modified_on` is `i64` rather than `u64` because the Huly transactor emits
+/// `-1` for synthetic / model-derived documents that lack a real modification
+/// timestamp. A `u64` field rejects those payloads at deserialization time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Doc {
     #[serde(rename = "_id")]
@@ -20,7 +24,7 @@ pub struct Doc {
     #[serde(rename = "space", default, skip_serializing_if = "Option::is_none")]
     pub space: Option<SpaceRef>,
     #[serde(rename = "modifiedOn", default)]
-    pub modified_on: u64,
+    pub modified_on: i64,
     #[serde(rename = "modifiedBy", default, skip_serializing_if = "Option::is_none")]
     pub modified_by: Option<String>,
     /// All other fields
@@ -29,10 +33,13 @@ pub struct Doc {
 }
 
 /// Result of findAll
+///
+/// `total` is `i64` because Huly returns `-1` to signal "total not computed"
+/// when the query did not request totals.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FindResult {
     pub docs: Vec<Doc>,
-    pub total: u64,
+    pub total: i64,
     #[serde(rename = "lookupMap", default, skip_serializing_if = "Option::is_none")]
     pub lookup_map: Option<Value>,
 }
@@ -69,7 +76,7 @@ mod tests {
             "_id": "doc-123",
             "_class": "core:class:Issue",
             "space": "project-1",
-            "modifiedOn": 1700000000000u64,
+            "modifiedOn": 1700000000000i64,
             "modifiedBy": "user:john",
             "title": "Fix bug",
             "priority": 1
@@ -129,6 +136,29 @@ mod tests {
         assert_eq!(result.docs.len(), 2);
         assert_eq!(result.total, 42);
         assert!(result.lookup_map.is_none());
+    }
+
+    #[test]
+    fn doc_accepts_negative_modified_on_from_synthetic_docs() {
+        // Huly transactor emits modifiedOn=-1 for model-derived docs.
+        let json = json!({
+            "_id": "model-doc",
+            "_class": "core:class:Class",
+            "modifiedOn": -1,
+        });
+        let doc: Doc = serde_json::from_value(json).unwrap();
+        assert_eq!(doc.modified_on, -1);
+    }
+
+    #[test]
+    fn find_result_accepts_negative_total_signal() {
+        // Huly returns total=-1 when the query did not ask for a count.
+        let json = json!({
+            "docs": [],
+            "total": -1,
+        });
+        let result: FindResult = serde_json::from_value(json).unwrap();
+        assert_eq!(result.total, -1);
     }
 
     #[test]

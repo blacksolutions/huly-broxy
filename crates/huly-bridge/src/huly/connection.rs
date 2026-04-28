@@ -267,14 +267,30 @@ impl WsConnection {
                 // (msgpack [+ snappy]). Trial-and-error fallback misinterprets text as
                 // binary the moment any JSON shape mismatch occurs.
                 let response: RpcResponse = match &msg {
-                    Message::Text(t) => match serde_json::from_str(t) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            warn!(error = %e, "failed to deserialize text ws message");
-                            debug!(payload = %text_prefix(t, 256), "raw text payload");
+                    Message::Text(t) => {
+                        // Application-level keepalive frames travel as **bare
+                        // strings**, not JSON. The transactor sends `"pong!"`
+                        // in reply to our outbound `"ping"` keepalive (see
+                        // `huly.core/packages/client/src/index.ts:82-83`:
+                        // `pingConst = 'ping'`, `pongConst = 'pong!'`). Short-
+                        // circuit before serde_json so the read loop doesn't
+                        // log a deserialize warning every 10s and so the
+                        // server-initiated `"ping"` case (rare but specified)
+                        // is treated as keepalive rather than malformed JSON.
+                        let s = t.as_str();
+                        if s == "ping" || s == "pong!" {
+                            debug!(payload = %s, "ws keepalive frame received");
                             continue;
                         }
-                    },
+                        match serde_json::from_str(s) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(error = %e, "failed to deserialize text ws message");
+                                debug!(payload = %text_prefix(t, 256), "raw text payload");
+                                continue;
+                            }
+                        }
+                    }
                     Message::Binary(b) => match deserialize::<RpcResponse>(b, protocol) {
                         Ok(r) => r,
                         Err(_) => match serde_json::from_slice::<RpcResponse>(b) {
@@ -1216,9 +1232,18 @@ mod tests {
             }
 
             // Capture the next frame (the keepalive under test) and echo
-            // the application-level pong so the bridge's read loop must
-            // exercise its filter path.
+            // BOTH wire formats the transactor uses for keepalive
+            // responses so the bridge's read loop must exercise both
+            // filter paths:
+            //   - bare-text `pong!` (huly.core client/src/index.ts:83) —
+            //     the actual production wire format
+            //   - JSON `{"result":"ping"}` — the alternate shape used
+            //     when the server initiates a keepalive round
             if let Some(Ok(msg)) = read.next().await {
+                write
+                    .send(Message::Text("pong!".into()))
+                    .await
+                    .unwrap();
                 write
                     .send(Message::Text(r#"{"result":"ping"}"#.into()))
                     .await

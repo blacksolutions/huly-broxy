@@ -13,6 +13,10 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let cli = Cli::parse();
 
     let config = config::BridgeConfig::from_file(&cli.config)?;

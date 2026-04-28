@@ -14,11 +14,25 @@ use huly_common::api::{
     UploadMarkupResponse,
 };
 use huly_common::types::{FindResult, TxResult};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+/// Hot-swappable handle to the platform client. Empty until the first WS connect
+/// completes; swapped back to empty on disconnect so handlers return 503.
+pub type PlatformClientHandle = Arc<RwLock<Option<Arc<dyn PlatformClient>>>>;
 
 #[derive(Clone)]
 pub struct PlatformState {
-    pub client: Arc<dyn PlatformClient>,
+    pub handle: PlatformClientHandle,
+}
+
+impl PlatformState {
+    fn client(&self) -> Result<Arc<dyn PlatformClient>, ApiError> {
+        self.handle
+            .read()
+            .expect("platform client handle poisoned")
+            .clone()
+            .ok_or_else(|| ApiError::ServiceUnavailable("platform client not yet available".into()))
+    }
 }
 
 /// State for markup endpoints (collaborator service).
@@ -35,10 +49,8 @@ pub async fn find(
     Json(req): Json<FindRequest>,
 ) -> Result<Json<FindResult>, ApiError> {
     validate_non_empty("class", &req.class)?;
-    let result = state
-        .client
-        .find_all(&req.class, req.query, req.options)
-        .await?;
+    let client = state.client()?;
+    let result = client.find_all(&req.class, req.query, req.options).await?;
     Ok(Json(result))
 }
 
@@ -47,10 +59,8 @@ pub async fn find_one(
     Json(req): Json<FindRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_non_empty("class", &req.class)?;
-    let result = state
-        .client
-        .find_one(&req.class, req.query, req.options)
-        .await?;
+    let client = state.client()?;
+    let result = client.find_one(&req.class, req.query, req.options).await?;
     match result {
         Some(doc) => Ok(Json(serde_json::to_value(doc).unwrap_or_default())),
         None => Ok(Json(serde_json::Value::Null)),
@@ -63,8 +73,8 @@ pub async fn create(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_non_empty("class", &req.class)?;
     validate_non_empty("space", &req.space)?;
-    let id = state
-        .client
+    let client = state.client()?;
+    let id = client
         .create_doc(&req.class, &req.space, req.attributes)
         .await?;
     Ok(Json(serde_json::json!({ "id": id })))
@@ -77,8 +87,8 @@ pub async fn update(
     validate_non_empty("class", &req.class)?;
     validate_non_empty("space", &req.space)?;
     validate_non_empty("id", &req.id)?;
-    let result = state
-        .client
+    let client = state.client()?;
+    let result = client
         .update_doc(&req.class, &req.space, &req.id, req.operations)
         .await?;
     Ok(Json(result))
@@ -93,8 +103,8 @@ pub async fn add_collection(
     validate_non_empty("attachedTo", &req.attached_to)?;
     validate_non_empty("attachedToClass", &req.attached_to_class)?;
     validate_non_empty("collection", &req.collection)?;
-    let id = state
-        .client
+    let client = state.client()?;
+    let id = client
         .add_collection(
             &req.class,
             &req.space,
@@ -117,8 +127,8 @@ pub async fn update_collection(
     validate_non_empty("attachedTo", &req.attached_to)?;
     validate_non_empty("attachedToClass", &req.attached_to_class)?;
     validate_non_empty("collection", &req.collection)?;
-    let result = state
-        .client
+    let client = state.client()?;
+    let result = client
         .update_collection(
             &req.class,
             &req.space,
@@ -140,8 +150,8 @@ pub async fn apply_if(
     if req.txes.is_empty() {
         return Err(ApiError::Validation("'txes' must not be empty".into()));
     }
-    let result = state
-        .client
+    let client = state.client()?;
+    let result = client
         .apply_if_tx(&req.scope, req.matches, req.not_matches, req.txes)
         .await?;
     Ok(Json(result))
@@ -154,10 +164,8 @@ pub async fn delete(
     validate_non_empty("class", &req.class)?;
     validate_non_empty("space", &req.space)?;
     validate_non_empty("id", &req.id)?;
-    let result = state
-        .client
-        .remove_doc(&req.class, &req.space, &req.id)
-        .await?;
+    let client = state.client()?;
+    let result = client.remove_doc(&req.class, &req.space, &req.id).await?;
     Ok(Json(result))
 }
 
@@ -332,9 +340,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app(client: MockPlatformClient) -> Router {
-        let state = PlatformState {
-            client: Arc::new(client),
-        };
+        let handle: PlatformClientHandle = Arc::new(RwLock::new(Some(
+            Arc::new(client) as Arc<dyn PlatformClient>,
+        )));
+        let state = PlatformState { handle };
         Router::new()
             .route("/api/v1/find", post(find))
             .route("/api/v1/find-one", post(find_one))
@@ -352,6 +361,80 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn platform_handlers_return_503_when_handle_empty() {
+        let handle: PlatformClientHandle = Arc::new(RwLock::new(None));
+        let state = PlatformState { handle };
+        let app = Router::new()
+            .route("/api/v1/find", post(find))
+            .route("/api/v1/apply-if", post(apply_if))
+            .with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "/api/v1/find",
+                json!({"class": "tracker:class:Project", "query": {}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let resp = app
+            .oneshot(json_request(
+                "/api/v1/apply-if",
+                json!({
+                    "scope": "test:scope",
+                    "matches": [],
+                    "notMatches": [],
+                    "txes": [{"_id": "x", "_class": "c", "space": "s", "objectId": "x", "objectClass": "c", "objectSpace": "s", "operations": {}}],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn platform_handlers_recover_after_swap() {
+        // Empty handle → 503; populate → 200; swap empty → 503 again.
+        let handle: PlatformClientHandle = Arc::new(RwLock::new(None));
+        let state = PlatformState {
+            handle: handle.clone(),
+        };
+        let app = Router::new()
+            .route("/api/v1/find", post(find))
+            .with_state(state);
+
+        let req = || {
+            json_request(
+                "/api/v1/find",
+                json!({"class": "tracker:class:Project", "query": {}}),
+            )
+        };
+
+        let resp = app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all().returning(|_, _, _| {
+            Box::pin(async {
+                Ok(FindResult {
+                    docs: vec![],
+                    total: 0,
+                    lookup_map: None,
+                })
+            })
+        });
+        *handle.write().unwrap() = Some(Arc::new(mock) as Arc<dyn PlatformClient>);
+        let resp = app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        *handle.write().unwrap() = None;
+        let resp = app.oneshot(req()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

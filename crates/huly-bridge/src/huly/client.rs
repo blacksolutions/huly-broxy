@@ -175,17 +175,52 @@ impl PlatformClient for HulyClient {
             .result
             .ok_or_else(|| ClientError::Format("missing result in findAll response".into()))?;
 
-        // Huly returns either a plain array or {docs, total, lookupMap}
+        // Huly transactor speaks three shapes:
+        //   1. plain `[doc, doc, …]`                         (legacy)
+        //   2. `{ docs: [...], total, lookupMap }`           (legacy wrapper)
+        //   3. `{ dataType: "TotalArray", value: [...],      (current 0.7.x)
+        //         total, lookupMap }`
+        // `total = -1` is the sentinel for "count not requested".
         if let Some(arr) = result.as_array() {
-            Ok(FindResult {
-                total: arr.len() as u64,
+            return Ok(FindResult {
+                total: arr.len() as i64,
                 docs: serde_json::from_value(Value::Array(arr.clone()))
                     .map_err(|e| ClientError::Format(e.to_string()))?,
                 lookup_map: None,
-            })
-        } else {
-            serde_json::from_value(result).map_err(|e| ClientError::Format(e.to_string()))
+            });
         }
+
+        if let Some(obj) = result.as_object() {
+            let docs_field = if obj.contains_key("value") {
+                "value"
+            } else if obj.contains_key("docs") {
+                "docs"
+            } else {
+                return Err(ClientError::Format(
+                    "findAll response object has neither `value` nor `docs`".into(),
+                ));
+            };
+            let docs_val = obj
+                .get(docs_field)
+                .cloned()
+                .unwrap_or_else(|| Value::Array(vec![]));
+            let docs: Vec<Doc> = serde_json::from_value(docs_val)
+                .map_err(|e| ClientError::Format(e.to_string()))?;
+            let total = obj
+                .get("total")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(docs.len() as i64);
+            let lookup_map = obj.get("lookupMap").filter(|v| !v.is_null()).cloned();
+            return Ok(FindResult {
+                docs,
+                total,
+                lookup_map,
+            });
+        }
+
+        Err(ClientError::Format(format!(
+            "findAll result is neither array nor object: {result}"
+        )))
     }
 
     async fn find_one(
@@ -477,6 +512,38 @@ mod tests {
         let result = client.find_all("cls", json!({}), None).await.unwrap();
         assert_eq!(result.total, 1);
         assert_eq!(result.docs[0].id, "a");
+    }
+
+    /// Huly transactor 0.7.x emits `{dataType: "TotalArray", value: [...],
+    /// total: -1, lookupMap: null}` instead of the legacy `{docs, total}`.
+    /// Total = -1 means "count not requested"; the parser must accept it.
+    #[tokio::test]
+    async fn find_all_handles_total_array_response() {
+        let mut mock = MockHulyConnection::new();
+        mock.expect_send_request().returning(|_, _| {
+            Box::pin(async {
+                Ok(mock_response(json!({
+                    "dataType": "TotalArray",
+                    "lookupMap": null,
+                    "total": -1,
+                    "value": [
+                        {"_id": "p1", "_class": "tracker:class:Project", "modifiedOn": -1},
+                        {"_id": "p2", "_class": "tracker:class:Project"},
+                    ],
+                })))
+            })
+        });
+
+        let client = HulyClient::new(Arc::new(mock));
+        let result = client
+            .find_all("tracker:class:Project", json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(result.total, -1);
+        assert_eq!(result.docs.len(), 2);
+        assert_eq!(result.docs[0].id, "p1");
+        assert_eq!(result.docs[0].modified_on, -1);
+        assert!(result.lookup_map.is_none());
     }
 
     #[tokio::test]

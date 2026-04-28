@@ -8,11 +8,19 @@ pub struct AccountsClient {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceLoginInfo {
     pub endpoint: String,
     pub token: String,
     #[serde(default)]
     pub workspace: String,
+    /// PersonId of the social identity the workspace token authenticates as.
+    /// Upstream `WorkspaceLoginInfo extends LoginInfo` (see
+    /// `huly.core/packages/account-client/src/types.ts:58`), so this field
+    /// is always present in real responses but typed `Option<>` for tolerance
+    /// against older accounts servers and test fixtures.
+    #[serde(default)]
+    pub social_id: Option<String>,
 }
 
 /// Result of `loginOtp`: indicates whether the OTP was sent and when retry is allowed.
@@ -230,6 +238,7 @@ mod tests {
                     "endpoint": "wss://huly.example.com/_transactor",
                     "token": "ws-scoped-token",
                     "workspace": "uuid-1234",
+                    "socialId": "soc-abc",
                 }
             })))
             .expect(1)
@@ -241,6 +250,29 @@ mod tests {
         assert_eq!(info.endpoint, "wss://huly.example.com/_transactor");
         assert_eq!(info.token, "ws-scoped-token");
         assert_eq!(info.workspace, "uuid-1234");
+        assert_eq!(info.social_id.as_deref(), Some("soc-abc"));
+    }
+
+    #[tokio::test]
+    async fn select_workspace_tolerates_missing_social_id() {
+        // Older accounts servers may omit the `socialId` field entirely;
+        // deserialize must accept the legacy shape.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 1,
+                "result": {
+                    "endpoint": "wss://huly.example.com/_transactor",
+                    "token": "ws-tok",
+                    "workspace": "ws-1",
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let c = AccountsClient::new(server.uri());
+        let info = c.select_workspace("t", "ws").await.unwrap();
+        assert!(info.social_id.is_none());
     }
 
     #[tokio::test]
@@ -321,6 +353,7 @@ mod tests {
                     "workspace": "uuid-test-workspace",
                     "workspaceUrl": "test-workspace",
                     "role": "OWNER",
+                    "socialId": "soc-token-flow",
                 }
             })))
             .expect(1)
@@ -332,6 +365,7 @@ mod tests {
         assert_eq!(info.endpoint, "wss://huly.example.com/_transactor");
         assert_eq!(info.token, "ws-scoped-token");
         assert_eq!(info.workspace, "uuid-test-workspace");
+        assert_eq!(info.social_id.as_deref(), Some("soc-token-flow"));
     }
 
     #[tokio::test]

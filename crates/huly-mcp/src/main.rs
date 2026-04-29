@@ -83,6 +83,12 @@ async fn main() -> anyhow::Result<()> {
         discovery::run_reaper(reaper_registry, stale_timeout, reaper_cancel).await;
     });
 
+    // Seed the registry from currently-running bridges before the MCP
+    // server starts handling tool calls. Without this, the first calls
+    // would race the periodic announcement and fail with
+    // "workspace not found".
+    discovery::seed_via_lookup(&nats_client, &registry, Duration::from_millis(500)).await;
+
     // Create MCP server
     let http_client = bridge_client::BridgeHttpClient::new(config.mcp.bridge_api_token);
     let catalog_unknown = config.mcp.catalog.unknown_keys();

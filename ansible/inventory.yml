@@ -1,0 +1,6 @@
+all:
+  children:
+    bridge:
+      hosts:
+        riven:
+          ansible_host: riven

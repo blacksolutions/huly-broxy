@@ -1,0 +1,10 @@
+---
+bridge_binary_local: "{{ playbook_dir }}/../target/x86_64-unknown-linux-gnu/release/huly-bridge"
+bridge_unit_local: "{{ playbook_dir }}/../systemd/huly-bridge.service"
+bridge_config_local: "{{ playbook_dir }}/files/bridge.toml"
+
+bridge_install_path: /usr/local/bin/huly-bridge
+bridge_unit_path: /etc/systemd/system/huly-bridge.service
+bridge_config_dir: /etc/huly-bridge
+bridge_config_path: /etc/huly-bridge/bridge.toml
+bridge_service: huly-bridge

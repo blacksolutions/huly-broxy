@@ -91,21 +91,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Create MCP server
     let http_client = bridge_client::BridgeHttpClient::new(config.mcp.bridge_api_token);
-    let catalog_unknown = config.mcp.catalog.unknown_keys();
-    if !catalog_unknown.is_empty() {
-        tracing::warn!(
-            keys = ?catalog_unknown,
-            "[mcp.catalog] override(s) reference unknown names — typo? Defaults will apply"
-        );
-    }
-    let catalog = mcp::catalog::Catalog::new(&config.mcp.catalog);
+    let schema_cache = mcp::schema_cache::SchemaCache::new(nats_client.clone());
     let sync_runner = config.mcp.sync.as_ref().map(sync::SyncRunner::new);
     if sync_runner.is_some() {
         tracing::info!("sync subprocess tools enabled (huly_sync_status, huly_sync_cards)");
     } else {
         tracing::info!("sync subprocess tools disabled (no [mcp.sync] config)");
     }
-    let server = mcp::server::HulyMcpServer::with_catalog(registry, http_client, catalog)
+    let server = mcp::server::HulyMcpServer::new(registry, http_client, schema_cache)
         .with_sync_runner(sync_runner);
 
     // Serve via stdio

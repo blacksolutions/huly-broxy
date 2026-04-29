@@ -1,7 +1,7 @@
-use crate::mcp::catalog::CatalogOverrides;
 use secrecy::SecretString;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use toml::Value;
 
 #[derive(Debug, Deserialize)]
 pub struct McpConfig {
@@ -26,11 +26,6 @@ pub struct McpSettings {
     /// Bearer token for authenticating with bridge `/api/v1/*` endpoints.
     /// Must match the bridge's `admin.api_token` value.
     pub bridge_api_token: Option<SecretString>,
-    /// Override card type / relation IDs. Defaults match Muhasebot deployment.
-    /// Use `[mcp.catalog.card_types]` and `[mcp.catalog.relations]` TOML
-    /// sub-tables to override per-name.
-    #[serde(default)]
-    pub catalog: CatalogOverrides,
     /// Optional configuration for the Node.js sync pipeline subprocess used
     /// by `huly_sync_status` and `huly_sync_cards`. If unset, those tools
     /// return a helpful error explaining how to configure them.
@@ -98,7 +93,6 @@ impl Default for McpSettings {
         Self {
             stale_timeout_secs: default_stale_timeout(),
             bridge_api_token: None,
-            catalog: CatalogOverrides::default(),
             sync: None,
         }
     }
@@ -116,9 +110,32 @@ impl Default for LogConfig {
 impl McpConfig {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
+        reject_legacy_catalog(&content)?;
         let config: McpConfig = toml::from_str(&content)?;
         Ok(config)
     }
+}
+
+/// Hard-error if the operator still has a `[mcp.catalog]` (or sub-table)
+/// section in their TOML. Card-type and association IDs are now resolved
+/// per-workspace at runtime via the bridge — silently ignoring the
+/// override is what got workspace-local IDs hardcoded into source in
+/// the first place. Loud migration is the safer default.
+fn reject_legacy_catalog(content: &str) -> anyhow::Result<()> {
+    let parsed: Value = toml::from_str(content)?;
+    let mcp = match parsed.get("mcp").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+    if mcp.contains_key("catalog") {
+        return Err(anyhow::anyhow!(
+            "[mcp.catalog] is no longer supported. Card type and relation IDs are now \
+             resolved per-workspace at runtime by the bridge. Remove the [mcp.catalog] \
+             (and any sub-tables like [mcp.catalog.card_types] / [mcp.catalog.relations]) \
+             section from your config."
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -155,27 +172,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_catalog_overrides() {
+    fn legacy_catalog_section_rejected_loudly() {
+        // Operators upgrading must remove [mcp.catalog] explicitly — silently
+        // ignoring it is what let workspace-local IDs hardcode into source
+        // last time around.
         let toml = r#"
             [nats]
             url = "nats://localhost:4222"
 
             [mcp.catalog.card_types]
-            "Module Spec" = "custom-module-id"
-
-            [mcp.catalog.relations]
-            "module" = "custom-rel-id"
+            "Module Spec" = "stale-id"
         "#;
+        let err = reject_legacy_catalog(toml).expect_err("must reject legacy catalog");
+        let msg = err.to_string();
+        assert!(msg.contains("[mcp.catalog]"), "msg: {msg}");
+        assert!(msg.contains("no longer supported"), "msg: {msg}");
+    }
 
-        let config: McpConfig = toml::from_str(toml).unwrap();
-        assert_eq!(
-            config.mcp.catalog.card_types.get("Module Spec"),
-            Some(&"custom-module-id".to_string())
-        );
-        assert_eq!(
-            config.mcp.catalog.relations.get("module"),
-            Some(&"custom-rel-id".to_string())
-        );
+    #[test]
+    fn config_without_legacy_catalog_passes() {
+        let toml = r#"
+            [nats]
+            url = "nats://localhost:4222"
+        "#;
+        reject_legacy_catalog(toml).unwrap();
     }
 
     #[test]

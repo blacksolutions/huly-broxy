@@ -227,6 +227,7 @@ mod tests {
             version: "0.1.0".into(),
             timestamp: 1700000000000,
             social_id: None,
+            schema_version: 0,
         };
 
         registry.update(ann).await;
@@ -256,8 +257,9 @@ mod tests {
                     uptime_secs: 0,
                     version: "0.1.0".into(),
                     timestamp: 0,
-                    social_id: None,
-                })
+            social_id: None,
+            schema_version: 0,
+        })
                 .await;
         }
 
@@ -278,8 +280,9 @@ mod tests {
                 uptime_secs: 0,
                 version: "0.1.0".into(),
                 timestamp: 0,
-                social_id: None,
-            })
+            social_id: None,
+            schema_version: 0,
+        })
             .await;
 
         // With a very short timeout, it should be considered stale after a small delay
@@ -302,6 +305,7 @@ mod tests {
             version: "0.1.0".into(),
             timestamp: 0,
             social_id: None,
+            schema_version: 0,
         };
 
         registry.update(ann.clone()).await;

@@ -48,12 +48,8 @@ $RECYCLE.BIN/
 .nfs*
 
 # --- Claude Code / agents ---
-.claude/settings.local.json
-.claude/worktrees/
-.claude/scheduled_tasks.lock
-.claude/.state/
-.claude/cache/
-.claude/logs/
+.claude/
+CLAUDE.md
 CLAUDE.local.md
 
 # --- Secrets / credentials (NEVER commit) ---

@@ -1,4 +1,4 @@
-use huly_common::announcement::{ANNOUNCE_SUBJECT, BridgeAnnouncement};
+use huly_common::announcement::{ANNOUNCE_SUBJECT, BridgeAnnouncement, LOOKUP_SUBJECT};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -117,6 +117,75 @@ pub async fn run_subscriber(
     }
 }
 
+/// Seed the registry on startup by sending a NATS request/reply lookup
+/// to currently-running bridges.
+///
+/// NATS core pub/sub has no replay, so a freshly-started MCP would
+/// otherwise have to wait up to `ANNOUNCE_INTERVAL_SECS` for the next
+/// periodic announcement before any tool call could resolve a workspace.
+/// Bridges respond to `LOOKUP_SUBJECT` with their current announcement,
+/// closing that startup gap to roughly one round-trip.
+///
+/// Uses scatter-gather: collects every reply that arrives within
+/// `gather_window`, supporting multi-bridge deployments. Returns silently
+/// on failure — the periodic subscriber will eventually populate the
+/// registry on its own.
+pub async fn seed_via_lookup(
+    client: &async_nats::Client,
+    registry: &BridgeRegistry,
+    gather_window: Duration,
+) {
+    use futures::StreamExt;
+
+    let inbox = client.new_inbox();
+    let mut subscription = match client.subscribe(inbox.clone()).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "lookup seed: failed to subscribe to reply inbox");
+            return;
+        }
+    };
+
+    if let Err(e) = client
+        .publish_with_reply(LOOKUP_SUBJECT.to_string(), inbox, Vec::new().into())
+        .await
+    {
+        warn!(error = %e, "lookup seed: failed to publish lookup request");
+        return;
+    }
+
+    let deadline = tokio::time::Instant::now() + gather_window;
+    let mut seeded = 0u32;
+    loop {
+        let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
+            Some(d) if !d.is_zero() => d,
+            _ => break,
+        };
+        match tokio::time::timeout(remaining, subscription.next()).await {
+            Ok(Some(msg)) => match serde_json::from_slice::<BridgeAnnouncement>(&msg.payload) {
+                Ok(announcement) => {
+                    info!(
+                        workspace = %announcement.workspace,
+                        ready = announcement.ready,
+                        "lookup seed: registered bridge"
+                    );
+                    registry.update(announcement).await;
+                    seeded += 1;
+                }
+                Err(e) => warn!(error = %e, "lookup seed: failed to parse reply"),
+            },
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    if seeded == 0 {
+        debug!("lookup seed: no bridges responded within window");
+    } else {
+        info!(count = seeded, "lookup seed: seeded bridges");
+    }
+}
+
 /// Periodically remove stale bridge entries from the registry.
 pub async fn run_reaper(
     registry: BridgeRegistry,
@@ -158,6 +227,7 @@ mod tests {
             version: "0.1.0".into(),
             timestamp: 1700000000000,
             social_id: None,
+            schema_version: 0,
         };
 
         registry.update(ann).await;
@@ -187,8 +257,9 @@ mod tests {
                     uptime_secs: 0,
                     version: "0.1.0".into(),
                     timestamp: 0,
-                    social_id: None,
-                })
+            social_id: None,
+            schema_version: 0,
+        })
                 .await;
         }
 
@@ -209,8 +280,9 @@ mod tests {
                 uptime_secs: 0,
                 version: "0.1.0".into(),
                 timestamp: 0,
-                social_id: None,
-            })
+            social_id: None,
+            schema_version: 0,
+        })
             .await;
 
         // With a very short timeout, it should be considered stale after a small delay
@@ -233,6 +305,7 @@ mod tests {
             version: "0.1.0".into(),
             timestamp: 0,
             social_id: None,
+            schema_version: 0,
         };
 
         registry.update(ann.clone()).await;

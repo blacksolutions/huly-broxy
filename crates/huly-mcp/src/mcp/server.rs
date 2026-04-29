@@ -1,6 +1,7 @@
 use crate::bridge_client::BridgeHttpClient;
 use crate::discovery::BridgeRegistry;
-use crate::mcp::catalog::{Catalog, CardType, IssueStatus, RelationType};
+use crate::mcp::catalog::IssueStatus;
+use crate::mcp::schema_cache::SchemaCache;
 use crate::mcp::tools;
 use crate::sync::SyncRunner;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -102,8 +103,11 @@ pub struct DiscoverParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FindCardsParams {
     pub workspace: Option<String>,
-    #[serde(rename = "type")]
-    pub card_type: Option<CardType>,
+    /// MasterTag name (e.g. "Module Spec"). Free-form: workspace-local
+    /// names are resolved per-workspace by the bridge. Omit to fetch
+    /// all card types known in the workspace's schema.
+    #[serde(default, alias = "type")]
+    pub kind: Option<String>,
     pub query: Option<String>,
     #[serde(default = "default_find_cards_limit")]
     pub limit: u32,
@@ -167,8 +171,11 @@ pub struct LinkIssueToCardParams {
     pub issue_identifier: String,
     #[serde(rename = "cardId")]
     pub card_id: String,
-    #[serde(rename = "relationType")]
-    pub relation_type: RelationType,
+    /// Association name (e.g. "module"). Free-form: workspace-local
+    /// names are resolved by the schema cache. Use `huly_discover` to
+    /// see what associations exist in a workspace.
+    #[serde(rename = "relation", alias = "relationType")]
+    pub relation: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -224,30 +231,25 @@ pub struct SyncCardsParams {
     pub dry_run: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HulyMcpServer {
     registry: BridgeRegistry,
     http_client: Arc<BridgeHttpClient>,
-    catalog: Arc<Catalog>,
+    schema_cache: SchemaCache,
     sync_runner: Option<Arc<SyncRunner>>,
     tool_router: ToolRouter<Self>,
 }
 
 impl HulyMcpServer {
-    #[allow(dead_code)]
-    pub fn new(registry: BridgeRegistry, http_client: BridgeHttpClient) -> Self {
-        Self::with_catalog(registry, http_client, Catalog::default())
-    }
-
-    pub fn with_catalog(
+    pub fn new(
         registry: BridgeRegistry,
         http_client: BridgeHttpClient,
-        catalog: Catalog,
+        schema_cache: SchemaCache,
     ) -> Self {
         Self {
             registry,
             http_client: Arc::new(http_client),
-            catalog: Arc::new(catalog),
+            schema_cache,
             sync_runner: None,
             tool_router: Self::tool_router(),
         }
@@ -439,10 +441,14 @@ impl HulyMcpServer {
 
     #[tool(
         name = "huly_find_cards",
-        description = "Find cards (Module Spec, Data Entity, Business Flow, Compliance Item, Product Decision, Jurisdiction). Card type IDs default to the Muhasebot deployment; override via [mcp.catalog.card_types] config."
+        description = "Find cards by MasterTag name. Names are workspace-local — call huly_discover to list what exists. Pass `kind` to fetch a specific MasterTag, omit to enumerate all known kinds in the workspace."
     )]
     async fn find_cards(&self, Parameters(params): Parameters<FindCardsParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
+        let workspace = match tools::resolve_workspace(&self.registry, params.workspace.as_deref()).await {
+            Ok(ws) => ws,
+            Err(e) => return e,
+        };
+        let proxy_url = match self.resolve_proxy_url(&workspace).await {
             Ok(u) => u,
             Err(e) => return e,
         };
@@ -450,8 +456,10 @@ impl HulyMcpServer {
         match tools::find_cards(
             &self.http_client,
             &proxy_url,
-            &self.catalog,
-            params.card_type,
+            &self.schema_cache,
+            &self.registry,
+            &workspace,
+            params.kind.as_deref(),
             params.query.as_deref(),
             limit,
         )
@@ -662,24 +670,30 @@ impl HulyMcpServer {
 
     #[tool(
         name = "huly_link_issue_to_card",
-        description = "Link an issue to a card via a relation (module / entity / flow / compliance / decision). Relation IDs default to Muhasebot; override via [mcp.catalog.relations] config."
+        description = "Link an issue to a card via a workspace-local Association (e.g. \"module\"). Use huly_discover to list available relations."
     )]
     async fn link_issue_to_card(&self, Parameters(params): Parameters<LinkIssueToCardParams>) -> String {
+        let workspace = match tools::resolve_workspace(&self.registry, params.workspace.as_deref()).await {
+            Ok(ws) => ws,
+            Err(e) => return e,
+        };
         let (proxy_url, modified_by) =
-            match self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await {
+            match self.resolve_proxy_and_modified_by(Some(&workspace)).await {
                 Ok(p) => p,
                 Err(e) => return e,
             };
         let issue_ident = params.issue_identifier.clone();
         let card_id = params.card_id.clone();
-        let rel_label = params.relation_type.name();
+        let relation = params.relation.clone();
         match tools::link_issue_to_card(
             &self.http_client,
             &proxy_url,
-            &self.catalog,
+            &self.schema_cache,
+            &self.registry,
+            &workspace,
             &issue_ident,
             &card_id,
-            params.relation_type,
+            &relation,
             &modified_by,
         )
         .await
@@ -687,11 +701,11 @@ impl HulyMcpServer {
             Ok(tools::LinkResult::IssueNotFound) => format!("Issue {} not found.", issue_ident),
             Ok(tools::LinkResult::AlreadyLinked { id }) => format!(
                 "Relation already exists between {} and card {} ({}). Skipped. Existing relation ID: {}",
-                issue_ident, card_id, rel_label, id
+                issue_ident, card_id, relation, id
             ),
             Ok(tools::LinkResult::Created { id }) => format!(
                 "Linked {} -> card {} ({}). Relation ID: {}",
-                issue_ident, card_id, rel_label, id
+                issue_ident, card_id, relation, id
             ),
             Err(e) => e,
         }
@@ -795,11 +809,12 @@ mod tests {
             version: "0.1.0".into(),
             timestamp: 0,
             social_id: None,
+            schema_version: 0,
         }
     }
 
     fn make_server(registry: BridgeRegistry) -> HulyMcpServer {
-        HulyMcpServer::new(registry, BridgeHttpClient::new(None))
+        HulyMcpServer::new(registry, BridgeHttpClient::new(None), SchemaCache::for_tests())
     }
 
     async fn make_server_with_mock(mock: &MockServer) -> HulyMcpServer {
@@ -807,7 +822,16 @@ mod tests {
         registry
             .update(make_announcement("ws1", &mock.uri(), true))
             .await;
-        HulyMcpServer::new(registry, BridgeHttpClient::new(None))
+        // Pre-seed the schema cache with the relation names used in tests.
+        // Real deployments fetch this lazily via NATS schema responder.
+        use huly_common::announcement::WorkspaceSchema;
+        let schema = SchemaCache::for_tests();
+        let mut ws_schema = WorkspaceSchema::default();
+        ws_schema.associations.insert("module".into(), "rel:module".into());
+        ws_schema.associations.insert("flow".into(), "rel:flow".into());
+        ws_schema.card_types.insert("Module Spec".into(), "ct:module-spec".into());
+        schema.install_for_tests("ws1", 1, ws_schema).await;
+        HulyMcpServer::new(registry, BridgeHttpClient::new(None), schema)
     }
 
     #[tokio::test]
@@ -1183,7 +1207,7 @@ mod tests {
         let result = server
             .find_cards(Parameters(FindCardsParams {
                 workspace: None,
-                card_type: Some(CardType::ModuleSpec),
+                kind: Some("Module Spec".into()),
                 query: Some("invoice".into()),
                 limit: 50,
             }))
@@ -1551,7 +1575,7 @@ mod tests {
                 workspace: None,
                 issue_identifier: "MUH-3".into(),
                 card_id: "card-7".into(),
-                relation_type: RelationType::Module,
+                relation: "module".into(),
             }))
             .await;
         assert!(result.contains("Linked MUH-3 -> card card-7 (module)"));
@@ -1592,7 +1616,7 @@ mod tests {
                 workspace: None,
                 issue_identifier: "MUH-3".into(),
                 card_id: "card-7".into(),
-                relation_type: RelationType::Flow,
+                relation: "flow".into(),
             }))
             .await;
         assert!(result.contains("already exists"));
@@ -1806,7 +1830,7 @@ mod tests {
             working_dir,
             timeout_secs: 5,
         });
-        HulyMcpServer::new(BridgeRegistry::new(), BridgeHttpClient::new(None))
+        HulyMcpServer::new(BridgeRegistry::new(), BridgeHttpClient::new(None), SchemaCache::for_tests())
             .with_sync_runner(Some(runner))
     }
 

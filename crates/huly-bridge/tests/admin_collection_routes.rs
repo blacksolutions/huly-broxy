@@ -128,6 +128,7 @@ impl PlatformClient for FakeClient {
 
 fn build_state(client: Arc<FakeClient>) -> AppState {
     use huly_bridge::admin::platform_api::PlatformClientHandle;
+    use huly_bridge::bridge::schema_resolver::SchemaHandle;
     use huly_bridge::huly::client::PlatformClient;
     use huly_bridge::service::workspace_token::WorkspaceTokenCache;
     use std::sync::RwLock;
@@ -143,6 +144,11 @@ fn build_state(client: Arc<FakeClient>) -> AppState {
         api_token: Some(SecretString::from("test-token")),
         collaborator_client: None,
         workspace_token_cache: WorkspaceTokenCache::new(),
+        schema_handle: SchemaHandle::with_card_type_names_for_tests(&[
+            "tracker:class:Issue",
+            "tracker:class:Project",
+            "core:class:Relation",
+        ]),
     }
 }
 

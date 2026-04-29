@@ -1,3 +1,4 @@
+use crate::bridge::schema_resolver::{ResolveError, SchemaHandle};
 use crate::huly::client::{ApplyIfResult, ClientError, PlatformClient};
 use crate::huly::collaborator::{CollaboratorClient, CollaboratorError};
 use crate::huly::markdown::{markdown_to_prosemirror_json, prosemirror_to_markdown};
@@ -23,6 +24,7 @@ pub type PlatformClientHandle = Arc<RwLock<Option<Arc<dyn PlatformClient>>>>;
 #[derive(Clone)]
 pub struct PlatformState {
     pub handle: PlatformClientHandle,
+    pub schema_handle: SchemaHandle,
 }
 
 impl PlatformState {
@@ -32,6 +34,20 @@ impl PlatformState {
             .expect("platform client handle poisoned")
             .clone()
             .ok_or_else(|| ApiError::ServiceUnavailable("platform client not yet available".into()))
+    }
+
+    /// Resolve `class`, treating platform-id-shaped values as opaque
+    /// pass-throughs and resolving names against the workspace schema.
+    /// Returns 422 for unknown / ambiguous names so the caller can react
+    /// instead of silently sending a garbage class to the transactor.
+    async fn resolve_class(&self, class: &str) -> Result<String, ApiError> {
+        match self.schema_handle.resolve_class(class).await {
+            Ok(id) => Ok(id),
+            Err(ResolveError::Unknown(name)) => Err(ApiError::Validation(format!(
+                "unknown class '{name}' — pass a platform id (e.g. tracker:class:Issue) or a known MasterTag/Association name"
+            ))),
+            Err(e @ ResolveError::Ambiguous { .. }) => Err(ApiError::Validation(e.to_string())),
+        }
     }
 }
 
@@ -49,8 +65,9 @@ pub async fn find(
     Json(req): Json<FindRequest>,
 ) -> Result<Json<FindResult>, ApiError> {
     validate_non_empty("class", &req.class)?;
+    let class = state.resolve_class(&req.class).await?;
     let client = state.client()?;
-    let result = client.find_all(&req.class, req.query, req.options).await?;
+    let result = client.find_all(&class, req.query, req.options).await?;
     Ok(Json(result))
 }
 
@@ -59,8 +76,9 @@ pub async fn find_one(
     Json(req): Json<FindRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_non_empty("class", &req.class)?;
+    let class = state.resolve_class(&req.class).await?;
     let client = state.client()?;
-    let result = client.find_one(&req.class, req.query, req.options).await?;
+    let result = client.find_one(&class, req.query, req.options).await?;
     match result {
         Some(doc) => Ok(Json(serde_json::to_value(doc).unwrap_or_default())),
         None => Ok(Json(serde_json::Value::Null)),
@@ -73,9 +91,10 @@ pub async fn create(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_non_empty("class", &req.class)?;
     validate_non_empty("space", &req.space)?;
+    let class = state.resolve_class(&req.class).await?;
     let client = state.client()?;
     let id = client
-        .create_doc(&req.class, &req.space, req.attributes)
+        .create_doc(&class, &req.space, req.attributes)
         .await?;
     Ok(Json(serde_json::json!({ "id": id })))
 }
@@ -87,9 +106,10 @@ pub async fn update(
     validate_non_empty("class", &req.class)?;
     validate_non_empty("space", &req.space)?;
     validate_non_empty("id", &req.id)?;
+    let class = state.resolve_class(&req.class).await?;
     let client = state.client()?;
     let result = client
-        .update_doc(&req.class, &req.space, &req.id, req.operations)
+        .update_doc(&class, &req.space, &req.id, req.operations)
         .await?;
     Ok(Json(result))
 }
@@ -103,13 +123,15 @@ pub async fn add_collection(
     validate_non_empty("attachedTo", &req.attached_to)?;
     validate_non_empty("attachedToClass", &req.attached_to_class)?;
     validate_non_empty("collection", &req.collection)?;
+    let class = state.resolve_class(&req.class).await?;
+    let attached_to_class = state.resolve_class(&req.attached_to_class).await?;
     let client = state.client()?;
     let id = client
         .add_collection(
-            &req.class,
+            &class,
             &req.space,
             &req.attached_to,
-            &req.attached_to_class,
+            &attached_to_class,
             &req.collection,
             req.attributes,
         )
@@ -127,14 +149,16 @@ pub async fn update_collection(
     validate_non_empty("attachedTo", &req.attached_to)?;
     validate_non_empty("attachedToClass", &req.attached_to_class)?;
     validate_non_empty("collection", &req.collection)?;
+    let class = state.resolve_class(&req.class).await?;
+    let attached_to_class = state.resolve_class(&req.attached_to_class).await?;
     let client = state.client()?;
     let result = client
         .update_collection(
-            &req.class,
+            &class,
             &req.space,
             &req.id,
             &req.attached_to,
-            &req.attached_to_class,
+            &attached_to_class,
             &req.collection,
             req.operations,
         )
@@ -164,8 +188,9 @@ pub async fn delete(
     validate_non_empty("class", &req.class)?;
     validate_non_empty("space", &req.space)?;
     validate_non_empty("id", &req.id)?;
+    let class = state.resolve_class(&req.class).await?;
     let client = state.client()?;
-    let result = client.remove_doc(&req.class, &req.space, &req.id).await?;
+    let result = client.remove_doc(&class, &req.space, &req.id).await?;
     Ok(Json(result))
 }
 
@@ -339,8 +364,13 @@ fn validate_non_empty(field: &str, value: &str) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::schema_resolver::SchemaHandle;
     use crate::huly::client::{ClientError, MockPlatformClient};
     use crate::huly::connection::ConnectionError;
+
+    fn test_schema_handle_with_names(names: &[&str]) -> SchemaHandle {
+        SchemaHandle::with_card_type_names_for_tests(names)
+    }
     use axum::body::Body;
     use axum::http::Request;
     use axum::Router;
@@ -350,10 +380,18 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app(client: MockPlatformClient) -> Router {
+        // Schema with a few identity-mapped names so tests can use either
+        // platform-id-shaped values (`tracker:class:Issue` — passthrough)
+        // or short names (`cls`, `c` — pre-mapped here). Real resolution
+        // is exercised in dedicated `class_resolution_*` tests below.
         let handle: PlatformClientHandle = Arc::new(RwLock::new(Some(
             Arc::new(client) as Arc<dyn PlatformClient>,
         )));
-        let state = PlatformState { handle };
+        let schema_handle = test_schema_handle_with_names(&["cls", "c", "pc"]);
+        let state = PlatformState {
+            handle,
+            schema_handle,
+        };
         Router::new()
             .route("/api/v1/find", post(find))
             .route("/api/v1/find-one", post(find_one))
@@ -376,7 +414,10 @@ mod tests {
     #[tokio::test]
     async fn platform_handlers_return_503_when_handle_empty() {
         let handle: PlatformClientHandle = Arc::new(RwLock::new(None));
-        let state = PlatformState { handle };
+        let state = PlatformState {
+            handle,
+            schema_handle: SchemaHandle::new(),
+        };
         let app = Router::new()
             .route("/api/v1/find", post(find))
             .route("/api/v1/apply-if", post(apply_if))
@@ -413,6 +454,7 @@ mod tests {
         let handle: PlatformClientHandle = Arc::new(RwLock::new(None));
         let state = PlatformState {
             handle: handle.clone(),
+            schema_handle: SchemaHandle::new(),
         };
         let app = Router::new()
             .route("/api/v1/find", post(find))

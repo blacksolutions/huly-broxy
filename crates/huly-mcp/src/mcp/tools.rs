@@ -11,9 +11,9 @@
 use crate::bridge_client::BridgeHttpClient;
 use crate::discovery::BridgeRegistry;
 use crate::mcp::catalog::{
-    Catalog, CardType, IssueStatus, MODEL_SPACE, NO_PARENT, RelationType, TASK_TYPE_ISSUE,
-    priority_name, status_id,
+    IssueStatus, MODEL_SPACE, NO_PARENT, TASK_TYPE_ISSUE, priority_name, status_id,
 };
+use crate::mcp::schema_cache::SchemaCache;
 use crate::txcud::{gen_tx_id, tx_collection_create, tx_create_doc, tx_update_doc};
 use huly_common::api::ApplyIfMatch;
 use huly_common::types::{Doc, FindOptions};
@@ -177,25 +177,43 @@ async fn find_all_simple(
 }
 
 /// Find cards of one or all types, optionally filtered by query substring.
+///
+/// `kind`:
+/// - `Some(name)` — fetch cards of that MasterTag name. The bridge resolves
+///   the name → workspace-local id before hitting the transactor; an
+///   unknown name surfaces as a 422 from the bridge.
+/// - `None` — enumerate all MasterTag names known in the workspace
+///   schema cache and union the results. If the schema cache is empty
+///   (workspace unknown / not yet fetched), returns an empty list rather
+///   than guessing.
+#[allow(clippy::too_many_arguments)]
 pub async fn find_cards(
     http: &BridgeHttpClient,
     proxy_url: &str,
-    catalog: &Catalog,
-    card_type: Option<CardType>,
+    schema: &SchemaCache,
+    registry: &BridgeRegistry,
+    workspace: &str,
+    kind: Option<&str>,
     query: Option<&str>,
     limit: u64,
 ) -> Result<Vec<Value>, String> {
-    let types: Vec<(CardType, String)> = match card_type {
-        Some(ct) => vec![(ct, catalog.card_type_id(ct).to_string())],
-        None => catalog.all_card_type_ids(),
+    let names: Vec<String> = match kind {
+        Some(name) => vec![name.to_string()],
+        None => schema
+            .get(workspace, registry)
+            .await
+            .card_types
+            .keys()
+            .cloned()
+            .collect(),
     };
 
     let mut cards = Vec::new();
-    for (ct, id) in types {
+    for name in names {
         let res = http
             .find(
                 proxy_url,
-                &id,
+                &name,
                 json!({}),
                 Some(FindOptions {
                     limit: Some(limit),
@@ -203,11 +221,11 @@ pub async fn find_cards(
                 }),
             )
             .await
-            .map_err(|e| format!("Bridge error fetching cards of type {}: {e}", ct.name()))?;
+            .map_err(|e| format!("Bridge error fetching cards of type {name}: {e}"))?;
         for doc in res.docs {
             let mut v = serde_json::to_value(&doc).unwrap_or_default();
             if let Some(obj) = v.as_object_mut() {
-                obj.insert("_cardType".into(), json!(ct.name()));
+                obj.insert("_cardType".into(), json!(name.clone()));
             }
             cards.push(v);
         }
@@ -758,19 +776,39 @@ pub enum ComponentResult {
 
 /// Link an issue to a card via a relation.
 ///
+/// `relation` is a free-form Association name (e.g. "module"). We resolve
+/// it to a workspace-local Association `_id` from the schema cache before
+/// stamping it into the relation's `association` attribute. Unknown names
+/// short-circuit before any tx so the caller gets a useful error.
+///
 /// Race-resistance: the dup-check + create are bundled into a single
 /// `apply_if_tx` whose `notMatch` predicate asserts that no Relation already
-/// links `(docA=issue, docB=card, association=rel)`.  On rejection we resolve
+/// links `(docA=issue, docB=card, association=rel)`. On rejection we resolve
 /// the existing Relation's id and return `AlreadyLinked`.
+#[allow(clippy::too_many_arguments)]
 pub async fn link_issue_to_card(
     http: &BridgeHttpClient,
     proxy_url: &str,
-    catalog: &Catalog,
+    schema: &SchemaCache,
+    registry: &BridgeRegistry,
+    workspace: &str,
     issue_identifier: &str,
     card_id: &str,
-    rel_type: RelationType,
+    relation: &str,
     modified_by: &str,
 ) -> Result<LinkResult, String> {
+    let assoc_id = schema
+        .get(workspace, registry)
+        .await
+        .associations
+        .get(relation)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Unknown relation '{relation}' in workspace '{workspace}'. Use huly_discover to list known associations."
+            )
+        })?;
+
     let issue_res = http
         .find(
             proxy_url,
@@ -788,7 +826,6 @@ pub async fn link_issue_to_card(
         None => return Ok(LinkResult::IssueNotFound),
     };
 
-    let assoc_id = catalog.relation_id(rel_type).to_string();
     let scope = format!("core:relation:{}:{}:{}", issue.id, card_id, assoc_id);
     let rel_id = gen_tx_id();
     let attrs = json!({

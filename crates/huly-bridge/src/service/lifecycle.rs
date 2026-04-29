@@ -97,6 +97,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         .unwrap_or_else(|| "huly".to_string());
 
     let nats_client_for_announcer = publisher.client().clone();
+    let nats_client_for_lookup = publisher.client().clone();
     let publisher = Arc::new(publisher) as Arc<dyn EventPublisher>;
     let publisher_ref = publisher.clone();
 
@@ -160,6 +161,27 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             start_time,
             announcer_social_id,
             announcer_cancel,
+        )
+        .await;
+    });
+
+    // Start NATS lookup responder so late-starting MCP subscribers can
+    // pull current state on demand instead of waiting for the next periodic
+    // announcement.
+    let lookup_cancel = cancel.clone();
+    let lookup_health = health.clone();
+    let lookup_workspace = config.huly.workspace.clone();
+    let lookup_proxy_url = config.admin.proxy_url();
+    let lookup_social_id = social_id_handle.clone();
+    let lookup_handle = tokio::spawn(async move {
+        announcer::run_lookup_responder(
+            nats_client_for_lookup,
+            lookup_workspace,
+            lookup_proxy_url,
+            lookup_health,
+            start_time,
+            lookup_social_id,
+            lookup_cancel,
         )
         .await;
     });
@@ -334,10 +356,11 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         error!(error = %e, "NATS flush failed during shutdown");
     }
 
-    // Await admin, watchdog, and announcer tasks (short timeout, they should stop quickly)
+    // Await admin, watchdog, announcer, and lookup tasks (short timeout, they should stop quickly)
     let _ = tokio::time::timeout(Duration::from_secs(5), admin_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), watchdog_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), announcer_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), lookup_handle).await;
 
     info!("service stopped");
     Ok(())

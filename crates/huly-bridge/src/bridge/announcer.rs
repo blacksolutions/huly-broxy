@@ -1,9 +1,11 @@
 use crate::admin::health::HealthState;
-use huly_common::announcement::{ANNOUNCE_INTERVAL_SECS, ANNOUNCE_SUBJECT, BridgeAnnouncement};
+use huly_common::announcement::{
+    ANNOUNCE_INTERVAL_SECS, ANNOUNCE_SUBJECT, BridgeAnnouncement, LOOKUP_SUBJECT,
+};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 
 /// Hot-swappable handle to the active workspace's social identity.
 /// Empty until the first successful Huly connect populates it; cleared on
@@ -35,7 +37,29 @@ fn build_announcement(
     }
 }
 
+async fn publish_announcement_to(
+    client: &async_nats::Client,
+    subject: async_nats::Subject,
+    announcement: &BridgeAnnouncement,
+) {
+    match serde_json::to_vec(announcement) {
+        Ok(payload) => {
+            if let Err(e) = client.publish(subject, payload.into()).await {
+                error!(error = %e, "failed to publish bridge announcement");
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "failed to serialize bridge announcement");
+        }
+    }
+}
+
 /// Run the periodic bridge announcement loop.
+///
+/// Publishes immediately on entry, then on every `ANNOUNCE_INTERVAL_SECS`
+/// tick. The eager publish closes the bridge-cold-start window where
+/// MCP subscribers would otherwise wait up to one full interval before
+/// seeing any state.
 pub async fn run_announcer(
     client: async_nats::Client,
     workspace: String,
@@ -47,35 +71,92 @@ pub async fn run_announcer(
 ) {
     let interval = Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
     let version = env!("CARGO_PKG_VERSION").to_string();
+    let subject: async_nats::Subject = ANNOUNCE_SUBJECT.into();
 
     loop {
+        let social_id = social_id_handle
+            .read()
+            .expect("social id handle poisoned")
+            .clone();
+        let announcement = build_announcement(
+            &workspace,
+            &proxy_url,
+            &health,
+            start_time,
+            &version,
+            social_id,
+        );
+        publish_announcement_to(&client, subject.clone(), &announcement).await;
+        debug!(workspace = %announcement.workspace, "published bridge announcement");
+
         tokio::select! {
             _ = cancel.cancelled() => {
                 debug!("announcer stopping");
                 return;
             }
-            _ = tokio::time::sleep(interval) => {
-                let social_id = social_id_handle
-                    .read()
-                    .expect("social id handle poisoned")
-                    .clone();
-                let announcement = build_announcement(
-                    &workspace, &proxy_url, &health, start_time, &version, social_id,
-                );
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
+}
 
-                match serde_json::to_vec(&announcement) {
-                    Ok(payload) => {
-                        if let Err(e) = client
-                            .publish(ANNOUNCE_SUBJECT.to_string(), payload.into())
-                            .await
-                        {
-                            error!(error = %e, "failed to publish bridge announcement");
-                        } else {
-                            debug!(workspace = %announcement.workspace, "published bridge announcement");
-                        }
+/// Respond to NATS request/reply lookups on `LOOKUP_SUBJECT`.
+///
+/// Lets late-starting MCP subscribers seed their registry without waiting
+/// for the next periodic announcement. Each request is answered with the
+/// current `BridgeAnnouncement` snapshot. Requests without a reply-to
+/// subject are dropped (they would have nowhere to deliver the response).
+pub async fn run_lookup_responder(
+    client: async_nats::Client,
+    workspace: String,
+    proxy_url: String,
+    health: HealthState,
+    start_time: Instant,
+    social_id_handle: SocialIdHandle,
+    cancel: CancellationToken,
+) {
+    use futures::StreamExt;
+
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let mut subscriber = match client.subscribe(LOOKUP_SUBJECT.to_string()).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            error!(error = %e, "failed to subscribe to bridge lookup subject");
+            return;
+        }
+    };
+
+    info!(subject = LOOKUP_SUBJECT, "listening for bridge lookup requests");
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                debug!("lookup responder stopping");
+                return;
+            }
+            msg = subscriber.next() => {
+                match msg {
+                    Some(msg) => {
+                        let Some(reply_to) = msg.reply else {
+                            debug!("lookup request without reply-to — ignoring");
+                            continue;
+                        };
+                        let social_id = social_id_handle
+                            .read()
+                            .expect("social id handle poisoned")
+                            .clone();
+                        let announcement = build_announcement(
+                            &workspace,
+                            &proxy_url,
+                            &health,
+                            start_time,
+                            &version,
+                            social_id,
+                        );
+                        publish_announcement_to(&client, reply_to, &announcement).await;
                     }
-                    Err(e) => {
-                        error!(error = %e, "failed to serialize bridge announcement");
+                    None => {
+                        warn!("lookup subscription closed");
+                        return;
                     }
                 }
             }

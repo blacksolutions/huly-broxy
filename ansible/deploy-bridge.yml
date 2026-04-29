@@ -1,0 +1,109 @@
+---
+- name: Deploy huly-bridge
+  hosts: bridge
+  gather_facts: false
+  become: true
+
+  pre_tasks:
+    - name: Verify local binary exists
+      ansible.builtin.stat:
+        path: "{{ bridge_binary_local }}"
+      delegate_to: localhost
+      become: false
+      register: local_bin
+
+    - name: Fail if binary missing
+      ansible.builtin.fail:
+        msg: "Binary not found at {{ bridge_binary_local }} — run `make linux` first."
+      when: not local_bin.stat.exists
+
+    - name: Verify local config exists
+      ansible.builtin.stat:
+        path: "{{ bridge_config_local }}"
+      delegate_to: localhost
+      become: false
+      register: local_cfg
+
+    - name: Fail if config missing
+      ansible.builtin.fail:
+        msg: "Vault config not found at {{ bridge_config_local }} — see ansible/README.md."
+      when: not local_cfg.stat.exists
+
+  tasks:
+    - name: Ensure config dir exists
+      ansible.builtin.file:
+        path: "{{ bridge_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install bridge config (vault-decrypted)
+      ansible.builtin.copy:
+        src: "{{ bridge_config_local }}"
+        dest: "{{ bridge_config_path }}"
+        mode: "0644"
+        owner: root
+        group: root
+      notify: Restart huly-bridge
+      no_log: true
+
+    - name: Install systemd unit
+      ansible.builtin.copy:
+        src: "{{ bridge_unit_local }}"
+        dest: "{{ bridge_unit_path }}"
+        mode: "0644"
+        owner: root
+        group: root
+      notify:
+        - Reload systemd
+        - Restart huly-bridge
+
+    - name: Install huly-bridge binary
+      ansible.builtin.copy:
+        src: "{{ bridge_binary_local }}"
+        dest: "{{ bridge_install_path }}"
+        mode: "0755"
+        owner: root
+        group: root
+      notify: Restart huly-bridge
+
+    - name: Flush handlers before enabling
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start huly-bridge
+      ansible.builtin.systemd:
+        name: "{{ bridge_service }}"
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart huly-bridge
+      ansible.builtin.systemd:
+        name: "{{ bridge_service }}"
+        state: restarted
+
+  post_tasks:
+    - name: Wait for service to settle
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Check service is active
+      ansible.builtin.command: systemctl is-active {{ bridge_service }}
+      register: svc_active
+      changed_when: false
+      failed_when: svc_active.stdout != "active"
+
+    - name: Show recent logs
+      ansible.builtin.command: journalctl -u {{ bridge_service }} -n 20 --no-pager
+      register: svc_logs
+      changed_when: false
+      failed_when: "false"
+
+    - name: Report logs
+      ansible.builtin.debug:
+        var: svc_logs.stdout_lines

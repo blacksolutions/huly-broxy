@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 /// NATS subject for bridge announcements
 pub const ANNOUNCE_SUBJECT: &str = "huly.bridge.announce";
 
+/// NATS request/reply subject for on-demand bridge discovery.
+/// Late-starting MCP subscribers send a request here to seed their registry
+/// without waiting up to `ANNOUNCE_INTERVAL_SECS` for the next periodic
+/// publish.
+pub const LOOKUP_SUBJECT: &str = "huly.bridge.lookup";
+
 /// Interval between announcements in seconds
 pub const ANNOUNCE_INTERVAL_SECS: u64 = 10;
 

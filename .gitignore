@@ -53,6 +53,8 @@ CLAUDE.md
 CLAUDE.local.md
 
 # --- Secrets / credentials (NEVER commit) ---
+ansible/files/bridge.toml
+ansible/files/mcp.toml
 *.pem
 *.key
 *.p12

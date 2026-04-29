@@ -1,6 +1,8 @@
 use crate::admin::health::HealthState;
+use crate::bridge::schema_resolver::SchemaHandle;
 use huly_common::announcement::{
     ANNOUNCE_INTERVAL_SECS, ANNOUNCE_SUBJECT, BridgeAnnouncement, LOOKUP_SUBJECT,
+    WorkspaceSchemaResponse, schema_fetch_subject,
 };
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +21,7 @@ fn build_announcement(
     start_time: Instant,
     version: &str,
     social_id: Option<String>,
+    schema_version: u64,
 ) -> BridgeAnnouncement {
     let status = health.status();
     BridgeAnnouncement {
@@ -34,6 +37,7 @@ fn build_announcement(
             .unwrap_or_default()
             .as_millis() as u64,
         social_id,
+        schema_version,
     }
 }
 
@@ -60,6 +64,7 @@ async fn publish_announcement_to(
 /// tick. The eager publish closes the bridge-cold-start window where
 /// MCP subscribers would otherwise wait up to one full interval before
 /// seeing any state.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_announcer(
     client: async_nats::Client,
     workspace: String,
@@ -67,6 +72,7 @@ pub async fn run_announcer(
     health: HealthState,
     start_time: Instant,
     social_id_handle: SocialIdHandle,
+    schema_handle: SchemaHandle,
     cancel: CancellationToken,
 ) {
     let interval = Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
@@ -78,6 +84,7 @@ pub async fn run_announcer(
             .read()
             .expect("social id handle poisoned")
             .clone();
+        let schema_version = schema_handle.version().await;
         let announcement = build_announcement(
             &workspace,
             &proxy_url,
@@ -85,6 +92,7 @@ pub async fn run_announcer(
             start_time,
             &version,
             social_id,
+            schema_version,
         );
         publish_announcement_to(&client, subject.clone(), &announcement).await;
         debug!(workspace = %announcement.workspace, "published bridge announcement");
@@ -105,6 +113,7 @@ pub async fn run_announcer(
 /// for the next periodic announcement. Each request is answered with the
 /// current `BridgeAnnouncement` snapshot. Requests without a reply-to
 /// subject are dropped (they would have nowhere to deliver the response).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_lookup_responder(
     client: async_nats::Client,
     workspace: String,
@@ -112,6 +121,7 @@ pub async fn run_lookup_responder(
     health: HealthState,
     start_time: Instant,
     social_id_handle: SocialIdHandle,
+    schema_handle: SchemaHandle,
     cancel: CancellationToken,
 ) {
     use futures::StreamExt;
@@ -144,6 +154,7 @@ pub async fn run_lookup_responder(
                             .read()
                             .expect("social id handle poisoned")
                             .clone();
+                        let schema_version = schema_handle.version().await;
                         let announcement = build_announcement(
                             &workspace,
                             &proxy_url,
@@ -151,11 +162,78 @@ pub async fn run_lookup_responder(
                             start_time,
                             &version,
                             social_id,
+                            schema_version,
                         );
                         publish_announcement_to(&client, reply_to, &announcement).await;
                     }
                     None => {
                         warn!("lookup subscription closed");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Respond to NATS request/reply schema-fetch on
+/// `huly.bridge.schema.<workspace>`. Replies with the current
+/// [`WorkspaceSchemaResponse`] snapshot of name → workspace-local id.
+///
+/// Letting consumers fetch the schema on demand (instead of embedding it
+/// in every periodic announcement) keeps the announcement payload small
+/// when a workspace grows hundreds of MasterTags.
+pub async fn run_schema_responder(
+    client: async_nats::Client,
+    workspace: String,
+    schema_handle: SchemaHandle,
+    cancel: CancellationToken,
+) {
+    use futures::StreamExt;
+
+    let subject = schema_fetch_subject(&workspace);
+    let mut subscriber = match client.subscribe(subject.clone()).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            error!(error = %e, subject = %subject, "failed to subscribe to schema fetch subject");
+            return;
+        }
+    };
+
+    info!(subject = %subject, "listening for workspace schema fetch requests");
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                debug!("schema responder stopping");
+                return;
+            }
+            msg = subscriber.next() => {
+                match msg {
+                    Some(msg) => {
+                        let Some(reply_to) = msg.reply else {
+                            debug!("schema fetch without reply-to — ignoring");
+                            continue;
+                        };
+                        let (schema_version, schema) = schema_handle.resolved().await;
+                        let resp = WorkspaceSchemaResponse {
+                            workspace: workspace.clone(),
+                            schema_version,
+                            schema,
+                        };
+                        match serde_json::to_vec(&resp) {
+                            Ok(payload) => {
+                                if let Err(e) = client.publish(reply_to, payload.into()).await {
+                                    error!(error = %e, "failed to publish schema response");
+                                }
+                            }
+                            Err(e) => {
+                                error!(error = %e, "failed to serialize schema response");
+                            }
+                        }
+                    }
+                    None => {
+                        warn!("schema subscription closed");
                         return;
                     }
                 }
@@ -181,7 +259,7 @@ mod tests {
         health.set_nats_connected(false);
 
         let ann = build_announcement(
-            "ws1", "http://localhost:9090", &health, Instant::now(), "0.1.0", None,
+            "ws1", "http://localhost:9090", &health, Instant::now(), "0.1.0", None, 0,
         );
         assert_eq!(ann.workspace, "ws1");
         assert_eq!(ann.proxy_url, "http://localhost:9090");
@@ -197,7 +275,7 @@ mod tests {
         let start = Instant::now() - Duration::from_secs(120);
 
         let ann = build_announcement(
-            "ws1", "http://localhost:9090", &health, start, "0.1.0", None,
+            "ws1", "http://localhost:9090", &health, start, "0.1.0", None, 0,
         );
         assert!(ann.uptime_secs >= 120);
     }
@@ -209,7 +287,7 @@ mod tests {
         health.set_nats_connected(true);
 
         let ann = build_announcement(
-            "ws1", "http://bridge:9090", &health, Instant::now(), "0.1.0", None,
+            "ws1", "http://bridge:9090", &health, Instant::now(), "0.1.0", None, 0,
         );
         let json = serde_json::to_vec(&ann).unwrap();
         let parsed: BridgeAnnouncement = serde_json::from_slice(&json).unwrap();
@@ -230,6 +308,7 @@ mod tests {
             Instant::now(),
             "0.1.0",
             Some("soc-7".into()),
+            0,
         );
         assert_eq!(ann.social_id.as_deref(), Some("soc-7"));
     }
@@ -238,8 +317,17 @@ mod tests {
     fn build_announcement_omits_social_id_when_handle_empty() {
         let health = HealthState::new();
         let ann = build_announcement(
-            "ws1", "http://h:9090", &health, Instant::now(), "0.1.0", None,
+            "ws1", "http://h:9090", &health, Instant::now(), "0.1.0", None, 0,
         );
         assert!(ann.social_id.is_none());
+    }
+
+    #[test]
+    fn build_announcement_propagates_schema_version() {
+        let health = HealthState::new();
+        let ann = build_announcement(
+            "ws1", "http://h:9090", &health, Instant::now(), "0.1.0", None, 17,
+        );
+        assert_eq!(ann.schema_version, 17);
     }
 }

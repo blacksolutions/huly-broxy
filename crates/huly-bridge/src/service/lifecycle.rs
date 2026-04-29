@@ -5,6 +5,7 @@ use crate::admin::router::{AppState, create_router};
 use crate::bridge::announcer::{self, SocialIdHandle};
 use crate::bridge::event_loop;
 use crate::bridge::nats_publisher::{EventPublisher, NatsPublisher};
+use crate::bridge::schema_resolver::{self, SchemaHandle};
 use crate::config::{AuthConfig, BridgeConfig};
 use crate::huly::accounts::{AccountsClient, AccountsError, WorkspaceLoginInfo, pick_primary_social_id};
 use crate::huly::auth;
@@ -98,6 +99,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
 
     let nats_client_for_announcer = publisher.client().clone();
     let nats_client_for_lookup = publisher.client().clone();
+    let nats_client_for_schema = publisher.client().clone();
     let publisher = Arc::new(publisher) as Arc<dyn EventPublisher>;
     let publisher_ref = publisher.clone();
 
@@ -113,6 +115,10 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     // Workspace social identity (PersonId) — populated after each successful
     // connect; consumed by the announcer so MCP receives it via NATS discovery.
     let social_id_handle: SocialIdHandle = Arc::new(RwLock::new(None));
+    // Workspace schema (MasterTags + Associations name → workspace-local id),
+    // populated after each successful connect by querying the transactor;
+    // consumed by the platform-API resolver and announced via NATS.
+    let schema_handle = SchemaHandle::new();
 
     let admin_state = AppState {
         health: health.clone(),
@@ -122,6 +128,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         api_token: config.admin.api_token.clone(),
         collaborator_client: collaborator_client.clone(),
         workspace_token_cache: workspace_token_cache.clone(),
+        schema_handle: schema_handle.clone(),
     };
     let admin_cancel = cancel.clone();
     let admin_handle = tokio::spawn(async move {
@@ -152,6 +159,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let announcer_workspace = config.huly.workspace.clone();
     let announcer_proxy_url = config.admin.proxy_url();
     let announcer_social_id = social_id_handle.clone();
+    let announcer_schema = schema_handle.clone();
     let announcer_handle = tokio::spawn(async move {
         announcer::run_announcer(
             nats_client_for_announcer,
@@ -160,6 +168,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             announcer_health,
             start_time,
             announcer_social_id,
+            announcer_schema,
             announcer_cancel,
         )
         .await;
@@ -173,6 +182,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let lookup_workspace = config.huly.workspace.clone();
     let lookup_proxy_url = config.admin.proxy_url();
     let lookup_social_id = social_id_handle.clone();
+    let lookup_schema = schema_handle.clone();
     let lookup_handle = tokio::spawn(async move {
         announcer::run_lookup_responder(
             nats_client_for_lookup,
@@ -181,7 +191,24 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             lookup_health,
             start_time,
             lookup_social_id,
+            lookup_schema,
             lookup_cancel,
+        )
+        .await;
+    });
+
+    // Start NATS schema responder so MCP can fetch the workspace's
+    // name → workspace-local-id map on demand once it sees a fresh
+    // `schema_version` in an announcement.
+    let schema_cancel = cancel.clone();
+    let schema_workspace = config.huly.workspace.clone();
+    let schema_responder_handle = schema_handle.clone();
+    let schema_handle_task = tokio::spawn(async move {
+        announcer::run_schema_responder(
+            nats_client_for_schema,
+            schema_workspace,
+            schema_responder_handle,
+            schema_cancel,
         )
         .await;
     });
@@ -276,10 +303,23 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         let huly_client: Arc<dyn PlatformClient> = Arc::new(HulyClient::new(conn_arc));
         *platform_client_handle
             .write()
-            .expect("platform client handle poisoned") = Some(huly_client);
+            .expect("platform client handle poisoned") = Some(huly_client.clone());
         *social_id_handle
             .write()
             .expect("social id handle poisoned") = ws_login.social_id.clone();
+
+        // Refresh the workspace schema (MasterTags + Associations). Failure
+        // here is non-fatal — the resolver simply continues serving its
+        // previous map (or the empty default), and platform handlers will
+        // surface a 422 for unknown names. Logged so an operator notices.
+        let refresh_handle = schema_handle.clone();
+        let refresh_client = huly_client.clone();
+        tokio::spawn(async move {
+            match schema_resolver::refresh(&*refresh_client, &refresh_handle).await {
+                Ok(v) => info!(schema_version = v, "workspace schema refreshed"),
+                Err(e) => error!(error = %e, "workspace schema refresh failed"),
+            }
+        });
 
         health.set_huly_connected(true);
         metrics::set_ws_connected(true);
@@ -361,6 +401,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(5), watchdog_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), announcer_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), lookup_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), schema_handle_task).await;
 
     info!("service stopped");
     Ok(())

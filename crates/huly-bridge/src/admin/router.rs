@@ -1,5 +1,6 @@
 use crate::admin::health::HealthState;
 use crate::admin::platform_api::{self, MarkupState, PlatformClientHandle, PlatformState};
+use crate::bridge::schema_resolver::SchemaHandle;
 use crate::huly::collaborator::CollaboratorClient;
 use crate::service::workspace_token::WorkspaceTokenCache;
 use axum::{
@@ -29,6 +30,9 @@ pub struct AppState {
     pub collaborator_client: Option<CollaboratorClient>,
     /// Workspace-scoped token cache (populated on each successful WS login).
     pub workspace_token_cache: WorkspaceTokenCache,
+    /// Per-workspace schema (MasterTags + Associations) resolver. Empty
+    /// until the first successful WS connect populates it.
+    pub schema_handle: SchemaHandle,
 }
 
 #[derive(Serialize)]
@@ -104,6 +108,7 @@ pub fn create_router(state: AppState) -> Router {
     {
         let platform_state = PlatformState {
             handle: state.platform_client.clone(),
+            schema_handle: state.schema_handle.clone(),
         };
         let platform_routes = Router::new()
             .route("/api/v1/find", post(platform_api::find))
@@ -195,6 +200,7 @@ mod tests {
             api_token: None,
             collaborator_client: None,
             workspace_token_cache: WorkspaceTokenCache::new(),
+            schema_handle: SchemaHandle::new(),
         }
     }
 
@@ -259,6 +265,7 @@ mod tests {
             api_token: Some(SecretString::from(token)),
             collaborator_client: None,
             workspace_token_cache: WorkspaceTokenCache::new(),
+            schema_handle: SchemaHandle::new(),
         }
     }
 

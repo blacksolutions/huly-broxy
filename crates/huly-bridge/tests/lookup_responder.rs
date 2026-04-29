@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use huly_bridge::admin::health::HealthState;
 use huly_bridge::bridge::announcer::{self, SocialIdHandle};
+use huly_bridge::bridge::schema_resolver::SchemaHandle;
 use huly_common::announcement::{BridgeAnnouncement, LOOKUP_SUBJECT};
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +33,7 @@ async fn lookup_responder_replies_with_current_announcement() {
 
     let responder_client = client.clone();
     let responder_cancel = cancel.clone();
+    let schema_handle = SchemaHandle::new();
     let responder = tokio::spawn(async move {
         announcer::run_lookup_responder(
             responder_client,
@@ -40,6 +42,7 @@ async fn lookup_responder_replies_with_current_announcement() {
             health,
             start_time,
             social_id_handle,
+            schema_handle,
             responder_cancel,
         )
         .await;
@@ -80,6 +83,7 @@ async fn lookup_responder_ignores_requests_without_reply_to() {
 
     let responder_client = client.clone();
     let responder_cancel = cancel.clone();
+    let schema_handle = SchemaHandle::new();
     let responder = tokio::spawn(async move {
         announcer::run_lookup_responder(
             responder_client,
@@ -88,6 +92,7 @@ async fn lookup_responder_ignores_requests_without_reply_to() {
             health,
             Instant::now(),
             social_id_handle,
+            schema_handle,
             responder_cancel,
         )
         .await;

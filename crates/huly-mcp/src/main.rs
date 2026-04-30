@@ -1,6 +1,8 @@
 mod bridge_client;
 mod config;
 mod discovery;
+#[allow(dead_code)] // P3: helper exposed for P4 to wire into the tool path.
+mod jwt_broker_client;
 mod mcp;
 mod sync;
 mod txcud;

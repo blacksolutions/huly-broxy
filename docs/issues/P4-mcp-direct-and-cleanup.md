@@ -89,6 +89,13 @@ In `huly_client_factory`, after building a client, MCP:
 - [ ] Bridge LOC reduced ≥30% from `5edc6e3` baseline.
 - [ ] E2E smoke documented in PR description.
 
+## P1 spike findings to honor
+
+- **Workspace UUID** is the REST URL key (not the human slug). `RestHulyClient` constructor takes the uuid + JWT; MCP gets both from P3's broker response.
+- **`huly_list_workspaces` requires the account-service token**, not the transactor JWT. MCP's `list_workspaces` handler calls the **account service** (separate base URL: `accounts.huly.black.solutions` or whatever `accounts_url` resolves to), authenticated with the `account_service_jwt` from the broker.
+- **`RestError::Upstream` must decode `{error: Status}` body.** Otherwise PR #11's `Status.params` capture (which gives us the `message` for `UnknownError`) regresses under REST. Mirror the JSON shape: top-level `{error: {code, message?, params?}}`. Apply the same lift logic from `huly_client::rpc::RpcError::deserialize`.
+- **429 handling** (D6 rate limiting): on `429 Too Many Requests`, MCP reads `Retry-After`, sleeps, retries up to N times (config; default 3), then surfaces a structured error to the tool caller (which P0 ensures is propagated as `isError: true` with a clear message).
+
 ## Risk: this is the biggest PR
 
 Acceptable to split into 2 commits within one PR for review clarity (e.g., commit 1: MCP wires new path with bridge HTTP still active; commit 2: deletes bridge HTTP). Both commits must build and test green.

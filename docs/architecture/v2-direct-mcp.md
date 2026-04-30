@@ -1,6 +1,8 @@
 # v2 — Direct-MCP architecture
 
-Status: **draft**, not yet ratified. Owner: Murat. Last updated: 2026-04-30.
+Status: **ratified** (open questions resolved). Owner: Murat. Last updated: 2026-04-30.
+
+> Beta-phase project. **No backward-compat shims** between phases. Mixed-deployment migration windows are not required (open question 5).
 
 ## TL;DR
 
@@ -161,17 +163,17 @@ If exit criteria fail → fall back to WS for MCP, design doc updated, JWT broke
 - MCP fetches on cold start + before expiry.
 - Tests: mint, expiry, refresh path.
 
-### P4 — MCP direct CRUD
+### P4 — MCP direct CRUD + bridge cleanup (combined per D10)
+
+Lockstep: this PR replaces MCP's bridge dependency *and* deletes the now-unreachable bridge code. No mixed-deployment window.
 
 - MCP uses `huly-client::RestHulyClient` (or `WsHulyClient` per P1 outcome).
 - Delete `crates/huly-mcp/src/bridge_client.rs`.
-- Delete `huly.bridge.{announce,lookup,schema}` consumers in MCP.
-
-### P5 — Bridge cleanup
-
-- Delete `crates/huly-bridge/src/admin/` (HTTP gateway).
-- Delete `bridge/announcer.rs` (announce subject + lookup responder).
-- Delete `bridge/schema_resolver.rs` if MCP fetches schema directly.
+- Delete `crates/huly-mcp/src/discovery.rs`.
+- Delete `crates/huly-bridge/src/admin/` (HTTP gateway, ~1500 LOC).
+- Delete `crates/huly-bridge/src/bridge/announcer.rs` (announce + lookup).
+- Delete `crates/huly-bridge/src/bridge/schema_resolver.rs`.
+- Delete from `huly-common::announcement`: `BridgeAnnouncement`, `LOOKUP_SUBJECT`, `SCHEMA_FETCH_SUBJECT_PREFIX`, `WorkspaceSchemaResponse`.
 - Bridge becomes ~30–40% of current size.
 
 ### P6 — One-process-per-workspace (D4)
@@ -199,17 +201,43 @@ If exit criteria fail → fall back to WS for MCP, design doc updated, JWT broke
 | 3rd-party integrations not yet built — `huly.event.*` consumers absent | high | Document subjects now; build at least one example consumer in `examples/` |
 | Refactor takes longer than expected, blocking other work | medium | Each PR is independent and reverts cleanly; can pause between any two |
 
-## Open questions
+## Resolved decisions (was: open questions)
 
-1. **Rate limiting.** Today bridge HTTP gateway has rate limits in `platform_api`. If MCP talks REST directly to transactor, rate limits move to transactor (which already has them) or MCP self-rate-limits. Decision: rely on transactor rate limits + `huly.mcp.error` events when 429s come back. No bridge-side rate limit needed.
+### D6 — Rate limiting: **MCP honors transactor rate limits, no gateway**
 
-2. **Audit retention.** `huly.mcp.*` events on a core NATS subject have no retention by default. Probably fine for now (consumers are expected to persist what they care about). Revisit if compliance needs it — JetStream stream with `huly.mcp.>` filter.
+Rate limiting belongs on the transactor side (already enforced there). MCP must respect the transactor's `429 Too Many Requests` + `Retry-After` header with exponential backoff, and proactively read any rate-limit hints the transactor announces (`X-RateLimit-Remaining`, etc.). MCP must not silently retry past `Retry-After` — failures surface as `huly.mcp.error` so external rate-limit dashboards can react.
 
-3. **Multi-agent identity.** `huly.mcp.tool.invoked` carries `agent_id`. Today MCP doesn't have a notion of "which agent is calling". Define: `agent_id = ${HULY_MCP_AGENT_ID}` env var, default to hostname+pid. Sufficient for audit.
+No bridge-side rate limit; the bridge HTTP gateway is being deleted, and the bridge's WS path doesn't proxy MCP traffic in v2.
 
-4. **Schema cache invalidation.** If MCP caches schema by `modelHash`, how does it learn the model changed? Option: subscribe to `huly.event.tx.*` for class/attribute changes (cheap — bridge already publishes). Option: TTL the cache. Decision: TTL (5min), invalidate on `LoadModel` mismatch.
+Implementation contract: MCP's HTTP client wraps `reqwest` with a token-bucket per workspace, primed from any rate-limit hints in transactor responses. Concurrent in-flight per workspace also capped (default 8) to prevent a runaway agent from saturating the upstream.
 
-5. **Mixed deployments during migration.** P4 ships before P5. Some MCPs talk direct, some still go through bridge. Bridge HTTP gateway must keep working until all MCPs upgrade. Plan: leave gateway code in place through P5; delete only after telemetry confirms zero callers for 2 weeks.
+### D7 — Audit retention: **default NATS pub/sub, no JetStream**
+
+Consumers persist what they care about. No JetStream stream for `huly.mcp.>` at v2 launch. Revisit when a compliance requirement justifies the operational cost.
+
+### D8 — Agent identity: **mandatory, no auto-fallback**
+
+`agent_id` is required in every MCP startup. **No hostname+pid fallback** — anonymized identifiers defeat the audit purpose. Sourced in priority order:
+
+1. `HULY_MCP_AGENT_ID` env var (explicit, recommended for production agents).
+2. MCP `initialize` request `clientInfo.name + clientInfo.version` (rmcp 1.3 surfaces this — Claude Code passes its identity here).
+3. **Fail to start** if neither is present. Loud error: "agent_id is required; set HULY_MCP_AGENT_ID or upgrade your MCP host to one that sends clientInfo".
+
+Stamped into `huly.mcp.tool.invoked` payload and into transactor TX `meta.request_id` correlations.
+
+### D9 — Schema cache invalidation: **subscribe-first, TTL-fallback**
+
+Primary: MCP subscribes to `huly.event.tx.*` filtered for `core:class:Class`, `core:class:Attribute`, `core:class:Mixin` operations. Any such TX invalidates the cached `WorkspaceSchema` for that workspace; MCP refetches `loadModel` on the next tool call.
+
+Fallback: TTL of 5 minutes. Trips when (a) bridge subscription is unavailable, (b) bridge has dropped the workspace WS, (c) NATS connectivity is flaky. The 5-minute window bounds blast radius if the subscribe path silently breaks.
+
+If a `huly.mcp.action.*` call hits a `Hierarchy.findClass` or similar schema-mismatch error, MCP **forces a refetch** before the next call (third recovery layer). Self-healing, no operator intervention.
+
+### D10 — No mixed-deployment migration: **P4 → P5 in lockstep**
+
+Beta phase. P4 (MCP direct) and P5 (bridge cleanup) merge in the same release window. No "leave gateway code for 2 weeks" period. Telemetry-wait was the cost of compatibility; we're not paying it.
+
+Practical effect: one deploy ships both new MCP binary and reduced bridge binary. Coordinated restart (Ansible playbook orders bridge first, then MCP) is acceptable downtime for beta.
 
 ## Definition of done
 

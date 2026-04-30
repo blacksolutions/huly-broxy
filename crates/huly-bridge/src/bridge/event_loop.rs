@@ -163,8 +163,8 @@ mod tests {
 
         let published = published.lock().unwrap();
         assert_eq!(published.len(), 2);
-        assert_eq!(published[0].0, "huly.events.tx");
-        assert_eq!(published[1].0, "huly.events.notification");
+        assert_eq!(published[0].0, "huly.event.tx");
+        assert_eq!(published[1].0, "huly.event.notification");
     }
 
     #[tokio::test]
@@ -341,6 +341,6 @@ mod tests {
         run_event_loop(rx, Arc::new(mock), "app", cancel).await;
 
         let published = published.lock().unwrap();
-        assert_eq!(published[0], "app.events.unknown");
+        assert_eq!(published[0], "app.event.unknown");
     }
 }

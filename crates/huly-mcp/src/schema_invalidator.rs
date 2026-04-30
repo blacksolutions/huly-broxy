@@ -9,11 +9,12 @@
 //!
 //! ## Subject choice
 //!
-//! The bridge currently publishes all transactor events under
-//! `{prefix}.events.tx` (single fan-out subject; payload contains the
+//! The bridge publishes all transactor events under
+//! `{prefix}.event.tx` (single fan-out subject; payload contains the
 //! `event` body). We subscribe to the wildcard
-//! `{prefix}.events.>` so we pick up any future per-class subject splits
-//! without code changes.
+//! `{prefix}.event.>` so we pick up any future per-class subject splits
+//! without code changes. The singular form is the canonical choice
+//! (see P7 reconciliation + `EVENT_SUBJECT_PREFIX`).
 //!
 //! ## Workspace targeting
 //!
@@ -91,9 +92,9 @@ pub async fn run_schema_invalidator(
     subject_prefix: &str,
     cancel: CancellationToken,
 ) {
-    // Wildcard catches both the current `huly.events.tx` and any future
-    // per-class subject split (`huly.events.tx.core.class.*`).
-    let subject = format!("{subject_prefix}.events.>");
+    // Wildcard catches the current `huly.event.tx` and any future
+    // per-class subject split (`huly.event.tx.core.class.*`).
+    let subject = format!("{subject_prefix}.event.>");
     let mut sub = match nats.subscribe(subject.clone()).await {
         Ok(s) => s,
         Err(e) => {
@@ -311,7 +312,7 @@ mod tests {
             "objectId": "synthetic-master-tag",
         });
         publisher
-            .publish("huly.events.tx", serde_json::to_vec(&tx).unwrap().into())
+            .publish("huly.event.tx", serde_json::to_vec(&tx).unwrap().into())
             .await
             .unwrap();
         publisher.flush().await.unwrap();

@@ -24,8 +24,13 @@ impl PublishError {
 }
 
 /// Build a NATS subject for a Huly event type.
+///
+/// Subject taxonomy is **singular** — `<prefix>.event.<type>` — to
+/// match `huly_common::announcement::EVENT_SUBJECT_PREFIX` and the
+/// MCP-side schema invalidator subscription pattern. The plural
+/// (`.events.`) form was an early-P4 typo; reconciled in P7.
 pub fn subject_for_event(prefix: &str, event_type: &str) -> String {
-    format!("{}.events.{}", prefix, event_type)
+    format!("{}.event.{}", prefix, event_type)
 }
 
 #[derive(Debug)]
@@ -104,14 +109,14 @@ mod tests {
 
     #[test]
     fn subject_for_event_default_prefix() {
-        assert_eq!(subject_for_event("huly", "tx"), "huly.events.tx");
+        assert_eq!(subject_for_event("huly", "tx"), "huly.event.tx");
     }
 
     #[test]
     fn subject_for_event_custom_prefix() {
         assert_eq!(
             subject_for_event("myapp", "doc.created"),
-            "myapp.events.doc.created"
+            "myapp.event.doc.created"
         );
     }
 
@@ -119,7 +124,7 @@ mod tests {
     fn subject_for_event_dotted_event_type() {
         assert_eq!(
             subject_for_event("huly", "chunter.message"),
-            "huly.events.chunter.message"
+            "huly.event.chunter.message"
         );
     }
 
@@ -153,12 +158,12 @@ mod tests {
         let mut mock = MockEventPublisher::new();
         mock.expect_publish()
             .withf(|subject, payload| {
-                subject == "huly.events.tx" && !payload.is_empty()
+                subject == "huly.event.tx" && !payload.is_empty()
             })
             .times(1)
             .returning(|_, _| Box::pin(async { Ok(()) }));
 
-        mock.publish("huly.events.tx", b"test payload")
+        mock.publish("huly.event.tx", b"test payload")
             .await
             .unwrap();
     }
@@ -171,7 +176,7 @@ mod tests {
                 Box::pin(async { Err(PublishError::Nats("connection refused".into())) })
             });
 
-        let result = mock.publish("huly.events.tx", b"data").await;
+        let result = mock.publish("huly.event.tx", b"data").await;
         assert!(result.is_err());
     }
 

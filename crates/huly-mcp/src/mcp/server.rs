@@ -13,6 +13,8 @@
 //! against `huly_client::collaborator` and the new schema cache.
 
 use crate::huly_client_factory::{FactoryError, HulyClientFactory};
+use crate::mcp::catalog::IssueStatus;
+use crate::mcp::tools;
 use crate::sync::SyncRunner;
 use huly_client::accounts::AccountsClient;
 use huly_client::client::{ClientError, PlatformClient};
@@ -76,6 +78,44 @@ pub struct DeleteParams {
     pub class: String,
     pub space: String,
     pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FindIssuesParams {
+    pub workspace: String,
+    #[serde(default)]
+    pub component: Option<String>,
+    #[serde(default)]
+    pub status: Option<IssueStatus>,
+    /// Title substring (case-insensitive).
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetIssueParams {
+    pub workspace: String,
+    /// Project-prefixed identifier, e.g. `MUH-42`.
+    pub identifier: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateIssueParams {
+    pub workspace: String,
+    pub identifier: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Already-resolved MarkupBlobRef (call `huly_upload_markup` first).
+    #[serde(default)]
+    pub description_ref: Option<String>,
+    #[serde(default)]
+    pub status: Option<IssueStatus>,
+    #[serde(default)]
+    pub priority: Option<u8>,
+    #[serde(default)]
+    pub component: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -311,6 +351,73 @@ impl HulyMcpServer {
             .await
             .map_err(|e| format_client_error(&e))?;
         serde_json::to_string_pretty(&result).map_err(|e| format!("{e}"))
+    }
+
+    /// Find issues with optional filters.
+    #[tool(
+        name = "huly_find_issues",
+        description = "Find tracker issues, optionally filtered by component, status, or title substring."
+    )]
+    async fn find_issues_tool(
+        &self,
+        Parameters(params): Parameters<FindIssuesParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let issues = tools::find_issues(
+            &*client,
+            params.component.as_deref(),
+            params.status,
+            params.query.as_deref(),
+            params.limit.unwrap_or(200),
+        )
+        .await?;
+        serde_json::to_string_pretty(&issues).map_err(|e| format!("{e}"))
+    }
+
+    /// Get an issue by identifier, plus its incoming/outgoing relations.
+    #[tool(
+        name = "huly_get_issue",
+        description = "Fetch a single tracker issue by project-prefixed identifier."
+    )]
+    async fn get_issue_tool(
+        &self,
+        Parameters(params): Parameters<GetIssueParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        match tools::get_issue(&*client, &params.identifier).await? {
+            Some(v) => serde_json::to_string_pretty(&v).map_err(|e| format!("{e}")),
+            None => Ok("null".into()),
+        }
+    }
+
+    /// Sparse update of a tracker issue.
+    #[tool(
+        name = "huly_update_issue",
+        description = "Update a tracker issue. Pass only the fields that should change."
+    )]
+    async fn update_issue_tool(
+        &self,
+        Parameters(params): Parameters<UpdateIssueParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let changed = tools::update_issue(
+            &*client,
+            &params.identifier,
+            params.title.as_deref(),
+            params.description_ref.as_deref(),
+            params.status,
+            params.priority,
+            params.component.as_deref(),
+        )
+        .await?;
+        match changed {
+            Some(fields) => Ok(serde_json::json!({
+                "identifier": params.identifier,
+                "changed": fields,
+            })
+            .to_string()),
+            None => Err(format!("Issue '{}' not found.", params.identifier)),
+        }
     }
 
     #[tool(

@@ -91,7 +91,7 @@ struct JsonRpcError {
     message: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AccountsError {
     #[error("network error: {0}")]
     Network(String),

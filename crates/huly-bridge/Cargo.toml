@@ -30,6 +30,8 @@ webpki-roots = "0.26"
 
 # NATS message queue
 async-nats = { workspace = true }
+# `Bytes` payload type for NATS messages
+bytes = "1"
 
 # Serialization
 serde = { workspace = true }
@@ -76,3 +78,4 @@ mockall = "0.13"
 wiremock = "0.6"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+tracing-test = "0.2"

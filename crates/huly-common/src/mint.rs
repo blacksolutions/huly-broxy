@@ -90,6 +90,13 @@ pub struct MintResponse {
 
     /// Workspace UUID — REST URL key, NOT the human-readable slug.
     pub workspace_uuid: String,
+
+    /// Accounts-service base URL. Required by `huly_list_workspaces` (which
+    /// calls the account service rather than the transactor). Optional for
+    /// backward compatibility with bridges that haven't been upgraded —
+    /// callers that need it must surface the gap rather than guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts_url: Option<String>,
 }
 
 /// Structured error reply. Wire shape is `{"error": {"code": ..., "message": ...}}`
@@ -146,6 +153,7 @@ mod tests {
             transactor_url: "wss://h.example/_transactor".into(),
             rest_base_url: "https://h.example/api/v1".into(),
             workspace_uuid: "uuid-1".into(),
+            accounts_url: Some("https://h.example/api/v1/accounts".into()),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let back: MintResponse = serde_json::from_str(&json).unwrap();
@@ -162,12 +170,30 @@ mod tests {
             transactor_url: "wss://h/_t".into(),
             rest_base_url: "https://h/api/v1".into(),
             workspace_uuid: "uuid-2".into(),
+            accounts_url: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         // Field is skipped when None, but deserialize defaults it back.
         assert!(!json.contains("account_service_jwt"));
+        assert!(!json.contains("accounts_url"));
         let back: MintResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn response_decodes_accounts_url_when_present() {
+        let json = serde_json::json!({
+            "jwt": "ws",
+            "expires_at_ms": 1u64,
+            "refresh_at_ms": 0u64,
+            "transactor_url": "wss://x",
+            "rest_base_url": "https://x/api/v1",
+            "workspace_uuid": "u",
+            "accounts_url": "https://accts.example/_accounts",
+        })
+        .to_string();
+        let r: MintResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(r.accounts_url.as_deref(), Some("https://accts.example/_accounts"));
     }
 
     #[test]

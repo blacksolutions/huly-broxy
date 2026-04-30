@@ -36,6 +36,10 @@ struct WorkspaceEntry {
     refresh_at_ms: u64,
     /// Account-service JWT — required by `huly_list_workspaces`.
     account_service_jwt: Option<String>,
+    /// Accounts-service base URL minted alongside the JWT. `None` if the
+    /// bridge did not advertise one — callers that need it must surface
+    /// the gap.
+    accounts_url: Option<String>,
     /// Schema cache, lazily populated on first access.
     schema: SchemaHandle,
     /// When the schema was last refreshed (process clock; `None` = never).
@@ -100,6 +104,17 @@ impl HulyClientFactory {
         workspace: &str,
     ) -> Result<Option<String>, FactoryError> {
         Ok(self.entry(workspace).await?.account_service_jwt)
+    }
+
+    /// Accounts-service base URL (e.g. `https://huly.example/_accounts`)
+    /// announced by the bridge alongside the workspace JWT. `None` if the
+    /// bridge did not advertise one — callers that need it (e.g.
+    /// `huly_list_workspaces`) must error rather than guess.
+    pub async fn accounts_url(
+        &self,
+        workspace: &str,
+    ) -> Result<Option<String>, FactoryError> {
+        Ok(self.entry(workspace).await?.accounts_url)
     }
 
     /// Get the resolved schema for `workspace`, refreshing if the cache is
@@ -168,6 +183,7 @@ impl HulyClientFactory {
             client,
             refresh_at_ms: resp.refresh_at_ms,
             account_service_jwt: resp.account_service_jwt,
+            accounts_url: resp.accounts_url,
             schema: SchemaHandle::new(),
             schema_refreshed_at: None,
         };
@@ -253,6 +269,7 @@ mod tests {
                 transactor_url: "wss://t.example/".into(),
                 rest_base_url: "https://r.example".into(),
                 workspace_uuid: "uuid-1".into(),
+                accounts_url: Some("https://r.example/_accounts".into()),
             };
             broker
                 .publish(reply_to, serde_json::to_vec(&MintReply::Ok(resp)).unwrap().into())
@@ -289,6 +306,7 @@ mod tests {
             )),
             refresh_at_ms: now_ms() + 60_000,
             account_service_jwt: None,
+            accounts_url: None,
             schema: SchemaHandle::new(),
             schema_refreshed_at: Some(Instant::now()),
         };
@@ -304,6 +322,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accounts_url_returned_from_seeded_entry() {
+        let Ok(c) = async_nats::connect("nats://127.0.0.1:4222").await else {
+            return;
+        };
+        let factory = HulyClientFactory::new(c, "agent");
+        let entry = WorkspaceEntry {
+            client: Arc::new(RestHulyClient::new("http://x", "u", "t")),
+            refresh_at_ms: now_ms() + 60_000,
+            account_service_jwt: Some("acct".into()),
+            accounts_url: Some("https://h.example/_accounts".into()),
+            schema: SchemaHandle::new(),
+            schema_refreshed_at: None,
+        };
+        factory.inner.write().await.insert("ws".into(), entry);
+        let url = factory.accounts_url("ws").await.unwrap();
+        assert_eq!(url.as_deref(), Some("https://h.example/_accounts"));
+    }
+
+    #[tokio::test]
     async fn forget_removes_workspace_from_cache() {
         let Ok(c) = async_nats::connect("nats://127.0.0.1:4222").await else {
             return;
@@ -313,6 +350,7 @@ mod tests {
             client: Arc::new(RestHulyClient::new("http://x", "u", "t")),
             refresh_at_ms: now_ms() + 60_000,
             account_service_jwt: None,
+            accounts_url: None,
             schema: SchemaHandle::new(),
             schema_refreshed_at: None,
         };

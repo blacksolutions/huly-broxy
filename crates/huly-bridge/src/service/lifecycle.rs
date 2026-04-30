@@ -70,6 +70,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let tls_ca_cert = config.huly.tls_ca_cert.clone();
     let mint_creds = effective_workspace_credentials(&config);
     let mint_rest_base_url = format!("{}/api/v1", config.huly.url.trim_end_matches('/'));
+    let mint_accounts_url = config.huly.accounts_url.clone();
     let subject_prefix = config
         .nats
         .subject_prefix
@@ -95,8 +96,12 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     // Start JWT broker — listens on `huly.bridge.mint`. Runs from boot
     // (does NOT depend on the WS connect loop) so MCP can mint cold-start
     // tokens even while the bridge's own WS session is reconnecting.
-    let mint_cfg = MintBrokerConfig::from_credentials(mint_rest_base_url, &mint_creds)
-        .map_err(|e| anyhow::anyhow!("mint broker config: {e}"))?;
+    let mint_cfg = MintBrokerConfig::from_credentials(
+        mint_rest_base_url,
+        mint_accounts_url,
+        &mint_creds,
+    )
+    .map_err(|e| anyhow::anyhow!("mint broker config: {e}"))?;
     let mint_accounts: Arc<dyn AccountsLogin> = Arc::new(accounts.clone());
     let mint_cancel = cancel.clone();
     let mint_handle = tokio::spawn(async move {

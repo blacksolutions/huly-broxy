@@ -177,24 +177,17 @@ impl HulyMcpServer {
                  huly_list_workspaces is unavailable."
                     .to_string()
             })?;
-        // Account service base URL: derive from the rest_base_url the broker
-        // reported. Fall back to the canonical /api/v1/accounts path on the
-        // same host.
-        // The factory does not currently expose the rest_base_url; until it
-        // does, prefer the upstream Huly default which AccountsClient
-        // resolves from {huly_url}/api/v1/accounts. We construct it here
-        // best-effort by using the workspace's rest base URL.
-        let rest = self
+        let accounts_base = self
             .factory
-            .rest_for_workspace(&workspace)
+            .accounts_url(&workspace)
             .await
-            .map_err(|e| format_factory_error(&e))?;
-        // RestHulyClient holds rest_base_url internally but doesn't expose
-        // it; the URL is also encoded in the JWT broker's MintResponse.
-        // For now, derive the accounts URL by trimming `/api/v1` if present
-        // off the workspace_uuid lookup path. Until we expose the field,
-        // operators can run accounts against the same host.
-        let accounts_base = derive_accounts_url(&rest);
+            .map_err(|e| format_factory_error(&e))?
+            .ok_or_else(|| {
+                "bridge JWT broker did not advertise an accounts_url for this workspace; \
+                 set [huly] accounts_url in the bridge config so huly_list_workspaces \
+                 knows where to query."
+                    .to_string()
+            })?;
         let accounts = AccountsClient::new(accounts_base);
         let workspaces = accounts
             .get_user_workspaces(&acct_jwt)
@@ -349,21 +342,6 @@ impl HulyMcpServer {
         });
         serde_json::to_string_pretty(&v).map_err(|e| format!("{e}"))
     }
-}
-
-/// Best-effort derivation of the accounts service base URL from the REST
-/// client we just minted for the workspace. Until the factory exposes
-/// `rest_base_url` directly, we don't have a clean source — fall back to
-/// the canonical Huly Cloud account host so production keeps working.
-///
-/// Operators with non-standard routing should override the bridge's
-/// `huly.accounts_url` anyway; this is just the default.
-fn derive_accounts_url(_rest: &Arc<huly_client::rest_huly_client::RestHulyClient>) -> String {
-    // Until factory exposes the rest_base_url metadata, this is a stub. The
-    // bridge's mint response is authoritative; the factory should be
-    // extended to expose it for fully clean handling. See the TODO in
-    // huly_client_factory.rs.
-    "https://huly.black.solutions/api/v1/accounts".to_string()
 }
 
 #[tool_handler]

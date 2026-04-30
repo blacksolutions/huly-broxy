@@ -13,6 +13,7 @@ pub mod markdown;
 pub mod proxy;
 pub mod rate_limit;
 pub mod rest;
+pub mod rest_huly_client;
 pub mod rpc;
 pub mod schema_resolver;
 pub mod types;

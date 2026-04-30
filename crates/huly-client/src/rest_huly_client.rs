@@ -124,8 +124,29 @@ impl RestHulyClient {
     /// trait methods below; exposed publicly so callers that already build
     /// Tx objects (e.g. the apply-if helpers) can bypass the convenience
     /// wrappers.
-    pub async fn raw_tx(&self, tx: Value) -> Result<Value, ClientError> {
+    ///
+    /// If a `request_id` is set in the surrounding [`with_request_id`]
+    /// task scope, it is stamped into the TX envelope's `meta`
+    /// object (key `request_id`). This is the audit-channel correlator
+    /// (P7 / D3): the bridge's `huly.event.tx.*` republish carries it
+    /// through unchanged, so MCP `huly.mcp.tool.invoked` events join
+    /// to the resulting transactor events on this id.
+    pub async fn raw_tx(&self, mut tx: Value) -> Result<Value, ClientError> {
         let url = format!("{}/api/v1/tx/{}", self.base_url, self.workspace_uuid);
+        if let Some(rid) = current_request_id() {
+            // Insert into `tx.meta.request_id`; create the object if
+            // it isn't already there. We deliberately don't overwrite
+            // an existing meta.request_id (caller-supplied wins).
+            let meta = tx
+                .as_object_mut()
+                .map(|o| o.entry("meta").or_insert_with(|| serde_json::json!({})));
+            if let Some(meta) = meta
+                && let Some(meta_obj) = meta.as_object_mut()
+                && !meta_obj.contains_key("request_id")
+            {
+                meta_obj.insert("request_id".to_string(), Value::String(rid));
+            }
+        }
         let body_clone = tx.clone();
         let body: Value = self
             .send_with_retry(move || self.authed(Method::POST, &url).json(&body_clone))
@@ -258,6 +279,31 @@ fn lift_status(err: &Value) -> (String, String) {
             .to_string()
     });
     (code, message)
+}
+
+tokio::task_local! {
+    /// Per-task audit correlator. MCP's `record_tool` wrapper enters
+    /// this scope around every tool body so the underlying
+    /// [`RestHulyClient::raw_tx`] can stamp `meta.request_id` on the
+    /// TX envelope without threading the id through every trait
+    /// method signature.
+    static REQUEST_ID: String;
+}
+
+/// Run `fut` in a task scope where `current_request_id()` returns
+/// `Some(rid)`. Idempotent — nested scopes shadow the outer value
+/// (the innermost wins, mirroring how rmcp's tool dispatch works).
+pub async fn with_request_id<F, T>(rid: String, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    REQUEST_ID.scope(rid, fut).await
+}
+
+/// Snapshot the request id of the currently-executing task, if any.
+/// Returns `None` outside of a [`with_request_id`] scope.
+pub fn current_request_id() -> Option<String> {
+    REQUEST_ID.try_with(|s| s.clone()).ok()
 }
 
 /// Current epoch milliseconds.
@@ -862,5 +908,61 @@ mod tests {
         let v = json!({"code": "x", "message": "top", "params": {"message": "lower"}});
         let (_, msg) = lift_status(&v);
         assert_eq!(msg, "top");
+    }
+
+    /// `raw_tx` stamps `meta.request_id` from the surrounding
+    /// [`with_request_id`] task scope. Verifies the wire body the
+    /// transactor receives carries the audit correlator end-to-end.
+    #[tokio::test]
+    async fn raw_tx_stamps_request_id_into_meta_when_in_scope() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        Mock::given(m_method("POST"))
+            .and(m_path("/api/v1/tx/ws-uuid-1"))
+            .and(body_partial_json(json!({
+                "_class": "core:class:TxCreateDoc",
+                "meta": {"request_id": "01J0RID000000000000000000"},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = client(server.uri());
+        with_request_id("01J0RID000000000000000000".to_string(), async {
+            c.create_doc("tracker:class:Issue", "proj-1", json!({"title": "T"}))
+                .await
+                .unwrap();
+        })
+        .await;
+    }
+
+    /// Outside of a [`with_request_id`] scope, no `meta.request_id`
+    /// is added to the TX. The transactor receives the legacy shape.
+    #[tokio::test]
+    async fn raw_tx_does_not_stamp_meta_outside_request_id_scope() {
+        let server = MockServer::start().await;
+        Mock::given(m_method("POST"))
+            .and(m_path("/api/v1/tx/ws-uuid-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = client(server.uri());
+        c.create_doc("tracker:class:Issue", "proj-1", json!({"title": "T"}))
+            .await
+            .unwrap();
+        // Confirm the body did NOT carry a meta key. wiremock doesn't
+        // expose negative body assertions directly, so inspect the
+        // recorded request body.
+        let received = server.received_requests().await.unwrap();
+        let req = received
+            .iter()
+            .find(|r| r.url.path().ends_with("/tx/ws-uuid-1"))
+            .unwrap();
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert!(
+            body.get("meta").is_none(),
+            "expected no meta when outside scope, got: {body}"
+        );
     }
 }

@@ -219,11 +219,11 @@ impl RestHulyClient {
 
 fn retry_after(headers: &HeaderMap, cfg: &RestHulyConfig) -> Duration {
     let info = RateLimitInfo::from_headers(headers);
-    let ms = info.retry_after_ms.unwrap_or_else(|| {
-        // Some servers send seconds-only `Retry-After`; rate_limit.rs already
-        // covers that. Fall back to the configured default when truly absent.
-        cfg.default_retry_after.as_millis() as u64
-    });
+    // Some servers send seconds-only `Retry-After`; rate_limit.rs already
+    // covers that. Fall back to the configured default when truly absent.
+    let ms = info
+        .retry_after_ms
+        .unwrap_or(cfg.default_retry_after.as_millis() as u64);
     let ms = ms.min(cfg.max_retry_after.as_millis() as u64);
     Duration::from_millis(ms)
 }

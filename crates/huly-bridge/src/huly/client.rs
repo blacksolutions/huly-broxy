@@ -477,6 +477,7 @@ mod tests {
             error: Some(RpcError {
                 code: code.to_string(),
                 message: message.to_string(),
+                params: None,
             }),
             chunk: None,
             rate_limit: None,

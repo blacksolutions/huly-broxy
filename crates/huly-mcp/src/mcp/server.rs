@@ -203,6 +203,11 @@ pub struct LinkIssueToCardParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DiscoverParams {
+    pub workspace: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SyncStatusParams {}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -682,6 +687,21 @@ impl HulyMcpServer {
             }
         };
         Ok(v.to_string())
+    }
+
+    /// Workspace introspection — projects, components, statuses, master
+    /// tags, associations, and an issue summary by status.
+    #[tool(
+        name = "huly_discover",
+        description = "One-shot snapshot of a workspace: projects, components, statuses, card types, associations, and an issue-by-status summary."
+    )]
+    async fn discover_tool(
+        &self,
+        Parameters(params): Parameters<DiscoverParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let v = tools::discover(&*client).await?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("{e}"))
     }
 
     #[tool(

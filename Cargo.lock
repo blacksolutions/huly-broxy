@@ -1021,6 +1021,7 @@ dependencies = [
  "async-trait",
  "clap",
  "futures",
+ "huly-client",
  "huly-common",
  "reqwest",
  "rmcp",

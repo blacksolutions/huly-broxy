@@ -1,7 +1,8 @@
 mod bridge_client;
 mod config;
 mod discovery;
-#[allow(dead_code)] // P3: helper exposed for P4 to wire into the tool path.
+#[allow(dead_code)] // wired by P4: factory consumes JwtBroker, MCP server consumes factory.
+mod huly_client_factory;
 mod jwt_broker_client;
 mod mcp;
 mod sync;

@@ -8,6 +8,7 @@ description = "Huly MCP Server - Model Context Protocol server for Huly bridge"
 
 [dependencies]
 huly-common = { path = "../huly-common" }
+huly-client = { path = "../huly-client" }
 
 # Async runtime
 tokio = { workspace = true }

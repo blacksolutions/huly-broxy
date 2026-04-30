@@ -76,10 +76,28 @@ pub struct RpcResponse {
 /// Huly transactor uses string platform-status identifiers (e.g.
 /// `platform:status:Unauthorized`, `platform:status:NotFound`) — not numeric codes.
 /// Accept both shapes during deserialize so legacy numeric responses still work.
+///
+/// The transactor serializes errors as a `Status` object
+/// (`{ severity, code, params }`) where the human-readable text often lives in
+/// `params.message` rather than at the top level. Concretely
+/// `unknownStatus(err.message)` (huly.core packages/platform/src/status.ts:88)
+/// produces `{ code: "platform:status:UnknownError", params: { message: "..." } }`
+/// — without the params capture the message would be silently dropped, leaving
+/// only the opaque `UnknownError` code in logs and at API boundaries.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RpcError {
     pub code: String,
+    /// Top-level `message` if present; otherwise lifted from `params.message`
+    /// when the wire payload is a Status object. Empty string when the
+    /// transactor supplied no human-readable text.
     pub message: String,
+    /// Full `Status.params` object preserved for diagnostic logging and any
+    /// downstream consumer that wants more than `message`. `None` when the
+    /// wire payload had no `params` field. `serde_json::Value` (not a typed
+    /// struct) because the shape varies per status code — `UnknownError`
+    /// carries `{message}`, others carry domain-specific fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
 }
 
 impl<'de> Deserialize<'de> for RpcError {
@@ -89,6 +107,8 @@ impl<'de> Deserialize<'de> for RpcError {
             code: Value,
             #[serde(default)]
             message: String,
+            #[serde(default)]
+            params: Option<Value>,
         }
         let raw = Raw::deserialize(de)?;
         let code = match raw.code {
@@ -96,7 +116,21 @@ impl<'de> Deserialize<'de> for RpcError {
             Value::Number(n) => n.to_string(),
             other => other.to_string(),
         };
-        Ok(RpcError { code, message: raw.message })
+        let message = if !raw.message.is_empty() {
+            raw.message
+        } else {
+            raw.params
+                .as_ref()
+                .and_then(|p| p.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        Ok(RpcError {
+            code,
+            message,
+            params: raw.params,
+        })
     }
 }
 
@@ -373,6 +407,81 @@ mod tests {
         let err = resp.error.unwrap();
         assert_eq!(err.code, "platform:status:Unauthorized");
         assert_eq!(err.message, "no");
+    }
+
+    #[test]
+    fn rpc_error_lifts_message_from_status_params() {
+        // Transactor's `unknownStatus` produces a Status object with the
+        // human-readable text inside `params.message`, not at the top
+        // level. Without this lift the bridge would log
+        // `code=platform:status:UnknownError message=` (empty), making
+        // every UnknownError indistinguishable.
+        let json_str = r#"{
+            "id": 7,
+            "error": {
+                "code": "platform:status:UnknownError",
+                "params": { "message": "Hierarchy: class not found" }
+            }
+        }"#;
+        let resp: RpcResponse = serde_json::from_str(json_str).unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "platform:status:UnknownError");
+        assert_eq!(err.message, "Hierarchy: class not found");
+        assert!(err.params.is_some(), "params must be preserved for diagnostics");
+    }
+
+    #[test]
+    fn rpc_error_top_level_message_takes_precedence() {
+        // If the transactor sets both top-level `message` and
+        // `params.message`, the top-level wins — keeps existing behavior
+        // for legacy responses.
+        let json_str = r#"{
+            "id": 7,
+            "error": {
+                "code": "platform:status:Forbidden",
+                "message": "explicit",
+                "params": { "message": "ignored" }
+            }
+        }"#;
+        let resp: RpcResponse = serde_json::from_str(json_str).unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.message, "explicit");
+        assert!(err.params.is_some());
+    }
+
+    #[test]
+    fn rpc_error_without_message_or_params_is_empty() {
+        // Defensive: a malformed/minimal error frame should not panic
+        // and should leave `message` empty rather than synthesizing one.
+        let json_str = r#"{"id": 7, "error": {"code": "platform:status:NotFound"}}"#;
+        let resp: RpcResponse = serde_json::from_str(json_str).unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "platform:status:NotFound");
+        assert_eq!(err.message, "");
+        assert!(err.params.is_none());
+    }
+
+    #[test]
+    fn rpc_error_preserves_arbitrary_params() {
+        // Other status codes carry domain-specific params (e.g.
+        // ReferencedObjectNotFound carries `{ id, _class }`). These must
+        // round-trip via the `params` Value so consumers can render
+        // helpful messages without the bridge knowing every shape.
+        let json_str = r#"{
+            "id": 9,
+            "error": {
+                "code": "platform:status:Custom",
+                "params": { "id": "abc", "_class": "tracker:class:Issue" }
+            }
+        }"#;
+        let resp: RpcResponse = serde_json::from_str(json_str).unwrap();
+        let err = resp.error.unwrap();
+        let p = err.params.as_ref().unwrap();
+        assert_eq!(p.get("id").and_then(Value::as_str), Some("abc"));
+        assert_eq!(
+            p.get("_class").and_then(Value::as_str),
+            Some("tracker:class:Issue")
+        );
     }
 
     #[test]

@@ -315,7 +315,18 @@ impl WsConnection {
                 // request id and would otherwise be silently dropped into the event
                 // channel, hiding auth/protocol failures behind a hello timeout.
                 if let Some(ref err) = response.error {
-                    warn!(code = %err.code, message = %err.message, id = response.id, "transactor error");
+                    let params_repr = err
+                        .params
+                        .as_ref()
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                    warn!(
+                        code = %err.code,
+                        message = %err.message,
+                        params = %params_repr,
+                        id = response.id,
+                        "transactor error"
+                    );
                 }
 
                 // Filter the application-level ping echo. The transactor

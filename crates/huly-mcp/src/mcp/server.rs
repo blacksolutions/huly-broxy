@@ -19,6 +19,7 @@ use crate::mcp::tools;
 use crate::sync::SyncRunner;
 use huly_client::accounts::AccountsClient;
 use huly_client::client::{ClientError, PlatformClient};
+use huly_client::rest_huly_client::with_request_id;
 use huly_common::mcp_subjects::ToolCompletedResult;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -310,7 +311,12 @@ impl HulyMcpServer {
             .tool_invoked(tool, workspace.as_deref(), &params_digest, &request_id)
             .await;
 
-        let outcome = body(request_id.clone()).await;
+        // Run the tool body inside a task-local scope that carries the
+        // request_id. The REST client reads it via `current_request_id`
+        // and stamps `meta.request_id` on every transactor TX it sends,
+        // so `huly.event.tx.*` republishes carry the correlator
+        // through to downstream subscribers (D3 join key).
+        let outcome = with_request_id(request_id.clone(), body(request_id.clone())).await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         match outcome {

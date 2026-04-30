@@ -2,9 +2,14 @@ use huly_common::announcement::{ANNOUNCE_SUBJECT, BridgeAnnouncement, LOOKUP_SUB
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// Maximum time a tool handler waits for the registry to populate on
+/// cold start before reporting "workspace not found". Covers the seed
+/// lookup window (~500ms) plus slack for the announcement subscriber.
+pub const COLD_START_WAIT: Duration = Duration::from_millis(750);
 
 #[derive(Debug)]
 struct BridgeInfo {
@@ -15,12 +20,14 @@ struct BridgeInfo {
 #[derive(Clone, Debug)]
 pub struct BridgeRegistry {
     bridges: Arc<RwLock<HashMap<String, BridgeInfo>>>,
+    notify: Arc<Notify>,
 }
 
 impl BridgeRegistry {
     pub fn new() -> Self {
         Self {
             bridges: Arc::new(RwLock::new(HashMap::new())),
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -34,6 +41,8 @@ impl BridgeRegistry {
                 last_seen: Instant::now(),
             },
         );
+        drop(bridges);
+        self.notify.notify_waiters();
     }
 
     pub async fn get(&self, workspace: &str) -> Option<BridgeAnnouncement> {
@@ -63,6 +72,62 @@ impl BridgeRegistry {
         }
 
         stale
+    }
+
+    /// Wait up to `timeout` for the named workspace to appear in the registry.
+    /// Returns immediately if already present. Returns `None` on timeout.
+    ///
+    /// Bridges seeds via `seed_via_lookup` and runs `run_subscriber`
+    /// concurrently with stdio serve, so callers that race those tasks
+    /// can use this to absorb startup latency before reporting "not found".
+    pub async fn wait_for_workspace(
+        &self,
+        name: &str,
+        timeout: Duration,
+    ) -> Option<BridgeAnnouncement> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Register as a waiter before checking, to avoid the lost-wakeup
+            // race where update() fires between get() and notified().await.
+            notified.as_mut().enable();
+
+            if let Some(ann) = self.get(name).await {
+                return Some(ann);
+            }
+
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(d) if !d.is_zero() => d,
+                _ => return None,
+            };
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// Wait up to `timeout` for at least one workspace to be registered.
+    /// Returns immediately if any are present.
+    pub async fn wait_for_any(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if !self.bridges.read().await.is_empty() {
+                return;
+            }
+
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(d) if !d.is_zero() => d,
+                _ => return,
+            };
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -290,6 +355,89 @@ mod tests {
         let removed = registry.remove_stale(Duration::from_millis(1)).await;
         assert_eq!(removed, vec!["old"]);
         assert!(registry.get("old").await.is_none());
+    }
+
+    fn ann(workspace: &str) -> BridgeAnnouncement {
+        BridgeAnnouncement {
+            workspace: workspace.into(),
+            proxy_url: "http://localhost:9090".into(),
+            huly_connected: true,
+            nats_connected: true,
+            ready: true,
+            uptime_secs: 0,
+            version: "0.1.0".into(),
+            timestamp: 0,
+            social_id: None,
+            schema_version: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_workspace_returns_immediately_when_present() {
+        let registry = BridgeRegistry::new();
+        registry.update(ann("ws1")).await;
+
+        let start = Instant::now();
+        let result = registry
+            .wait_for_workspace("ws1", Duration::from_millis(500))
+            .await;
+        assert!(result.is_some());
+        assert!(start.elapsed() < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn wait_for_workspace_resolves_when_added_concurrently() {
+        let registry = BridgeRegistry::new();
+        let r2 = registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            r2.update(ann("ws1")).await;
+        });
+
+        let result = registry
+            .wait_for_workspace("ws1", Duration::from_millis(500))
+            .await;
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().workspace, "ws1");
+    }
+
+    #[tokio::test]
+    async fn wait_for_workspace_returns_none_on_timeout() {
+        let registry = BridgeRegistry::new();
+        let result = registry
+            .wait_for_workspace("ghost", Duration::from_millis(20))
+            .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_workspace_ignores_unrelated_updates() {
+        let registry = BridgeRegistry::new();
+        let r2 = registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            r2.update(ann("other")).await;
+        });
+
+        let result = registry
+            .wait_for_workspace("target", Duration::from_millis(80))
+            .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_any_resolves_on_first_announcement() {
+        let registry = BridgeRegistry::new();
+        let r2 = registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            r2.update(ann("ws1")).await;
+        });
+
+        let start = Instant::now();
+        registry.wait_for_any(Duration::from_millis(500)).await;
+        assert!(start.elapsed() < Duration::from_millis(200));
+        assert_eq!(registry.list_workspaces().await.len(), 1);
     }
 
     #[tokio::test]

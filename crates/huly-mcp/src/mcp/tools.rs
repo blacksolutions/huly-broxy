@@ -9,7 +9,7 @@
 //! an error message.
 
 use crate::bridge_client::BridgeHttpClient;
-use crate::discovery::BridgeRegistry;
+use crate::discovery::{BridgeRegistry, COLD_START_WAIT};
 use crate::mcp::catalog::{
     IssueStatus, MODEL_SPACE, NO_PARENT, TASK_TYPE_ISSUE, priority_name, status_id,
 };
@@ -27,7 +27,12 @@ pub async fn resolve_workspace(
     if let Some(ws) = requested {
         return Ok(ws.to_string());
     }
-    let all = registry.list_workspaces().await;
+    let mut all = registry.list_workspaces().await;
+    if all.is_empty() {
+        // Cold-start race: seed/announcement may still be in flight.
+        registry.wait_for_any(COLD_START_WAIT).await;
+        all = registry.list_workspaces().await;
+    }
     match all.len() {
         0 => Err("No workspaces discovered. Use huly_list_workspaces to verify.".to_string()),
         1 => Ok(all[0].workspace.clone()),

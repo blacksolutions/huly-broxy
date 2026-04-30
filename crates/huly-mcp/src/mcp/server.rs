@@ -1,5 +1,5 @@
 use crate::bridge_client::BridgeHttpClient;
-use crate::discovery::BridgeRegistry;
+use crate::discovery::{BridgeRegistry, COLD_START_WAIT};
 use crate::mcp::catalog::IssueStatus;
 use crate::mcp::schema_cache::SchemaCache;
 use crate::mcp::tools;
@@ -262,14 +262,24 @@ impl HulyMcpServer {
     }
 
     async fn resolve_proxy_url(&self, workspace: &str) -> Result<String, String> {
-        match self.registry.get(workspace).await {
-            Some(ann) if ann.ready => {
-                validate_proxy_url(&ann.proxy_url)?;
-                Ok(ann.proxy_url)
-            }
-            Some(_) => Err(format!("bridge for workspace '{}' is not ready", workspace)),
-            None => Err(format!("workspace '{}' not found. Use huly_list_workspaces to see available workspaces.", workspace)),
+        let ann = match self.registry.get(workspace).await {
+            Some(ann) => ann,
+            None => self
+                .registry
+                .wait_for_workspace(workspace, COLD_START_WAIT)
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "workspace '{}' not found. Use huly_list_workspaces to see available workspaces.",
+                        workspace
+                    )
+                })?,
+        };
+        if !ann.ready {
+            return Err(format!("bridge for workspace '{}' is not ready", workspace));
         }
+        validate_proxy_url(&ann.proxy_url)?;
+        Ok(ann.proxy_url)
     }
 
     /// Resolve workspace name (explicit OR sole-registered) and return its
@@ -292,11 +302,18 @@ impl HulyMcpServer {
         workspace: Option<&str>,
     ) -> Result<(String, String), String> {
         let ws = tools::resolve_workspace(&self.registry, workspace).await?;
-        let ann = self
-            .registry
-            .get(&ws)
-            .await
-            .ok_or_else(|| format!("workspace '{ws}' not found. Use huly_list_workspaces to see available workspaces."))?;
+        let ann = match self.registry.get(&ws).await {
+            Some(a) => a,
+            None => self
+                .registry
+                .wait_for_workspace(&ws, COLD_START_WAIT)
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "workspace '{ws}' not found. Use huly_list_workspaces to see available workspaces."
+                    )
+                })?,
+        };
         if !ann.ready {
             return Err(format!("bridge for workspace '{ws}' is not ready"));
         }
@@ -326,7 +343,11 @@ impl HulyMcpServer {
     /// List all discovered Huly workspaces and their bridge status.
     #[tool(name = "huly_list_workspaces", description = "List all discovered Huly workspaces and their bridge connection status")]
     async fn list_workspaces(&self, _params: Parameters<ListWorkspacesParams>) -> String {
-        let workspaces = self.registry.list_workspaces().await;
+        let mut workspaces = self.registry.list_workspaces().await;
+        if workspaces.is_empty() {
+            self.registry.wait_for_any(COLD_START_WAIT).await;
+            workspaces = self.registry.list_workspaces().await;
+        }
         if workspaces.is_empty() {
             return "No workspaces discovered. Ensure bridge instances are running and connected to NATS.".to_string();
         }
@@ -337,12 +358,22 @@ impl HulyMcpServer {
     #[tool(name = "huly_status", description = "Get bridge status for a specific workspace or all workspaces")]
     async fn status(&self, Parameters(params): Parameters<StatusParams>) -> String {
         match params.workspace {
-            Some(ws) => match self.registry.get(&ws).await {
-                Some(ann) => serde_json::to_string_pretty(&ann).unwrap_or_else(|e| format!("Error: {e}")),
-                None => format!("Workspace '{}' not found", ws),
-            },
+            Some(ws) => {
+                let ann = match self.registry.get(&ws).await {
+                    Some(a) => Some(a),
+                    None => self.registry.wait_for_workspace(&ws, COLD_START_WAIT).await,
+                };
+                match ann {
+                    Some(a) => serde_json::to_string_pretty(&a).unwrap_or_else(|e| format!("Error: {e}")),
+                    None => format!("Workspace '{}' not found", ws),
+                }
+            }
             None => {
-                let workspaces = self.registry.list_workspaces().await;
+                let mut workspaces = self.registry.list_workspaces().await;
+                if workspaces.is_empty() {
+                    self.registry.wait_for_any(COLD_START_WAIT).await;
+                    workspaces = self.registry.list_workspaces().await;
+                }
                 serde_json::to_string_pretty(&workspaces).unwrap_or_else(|e| format!("Error: {e}"))
             }
         }

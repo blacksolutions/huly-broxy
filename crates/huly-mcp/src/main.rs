@@ -83,11 +83,15 @@ async fn main() -> anyhow::Result<()> {
         discovery::run_reaper(reaper_registry, stale_timeout, reaper_cancel).await;
     });
 
-    // Seed the registry from currently-running bridges before the MCP
-    // server starts handling tool calls. Without this, the first calls
-    // would race the periodic announcement and fail with
-    // "workspace not found".
-    discovery::seed_via_lookup(&nats_client, &registry, Duration::from_millis(500)).await;
+    // Seed concurrently with stdio serve so the MCP handshake
+    // (initialize/tools/list) is reachable in <50ms regardless of NATS
+    // round-trip. Tool handlers absorb the residual race via
+    // BridgeRegistry::wait_for_workspace.
+    let seed_client = nats_client.clone();
+    let seed_registry = registry.clone();
+    tokio::spawn(async move {
+        discovery::seed_via_lookup(&seed_client, &seed_registry, Duration::from_millis(500)).await;
+    });
 
     // Create MCP server
     let http_client = bridge_client::BridgeHttpClient::new(config.mcp.bridge_api_token);

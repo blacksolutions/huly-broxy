@@ -7,6 +7,7 @@ mod config;
 mod huly_client_factory;
 mod jwt_broker_client;
 mod mcp;
+mod schema_invalidator;
 mod sync;
 mod txcud;
 
@@ -90,8 +91,29 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("sync subprocess tools disabled (no [mcp.sync] config)");
     }
-    let server = mcp::server::HulyMcpServer::new(factory, nats_client.clone(), agent_id)
+    let server = mcp::server::HulyMcpServer::new(factory.clone(), nats_client.clone(), agent_id)
         .with_sync_runner(sync_runner);
+
+    // Subscribe-first schema invalidation (D9). Runs alongside the rmcp
+    // server; cancelled when the process is shutting down.
+    let invalidator_cancel = tokio_util::sync::CancellationToken::new();
+    let invalidator_cancel_for_task = invalidator_cancel.clone();
+    let invalidator_factory = factory.clone();
+    let invalidator_nats = nats_client.clone();
+    let subject_prefix = config
+        .nats
+        .subject_prefix
+        .clone()
+        .unwrap_or_else(|| "huly".to_string());
+    let invalidator_handle = tokio::spawn(async move {
+        schema_invalidator::run_schema_invalidator(
+            invalidator_nats,
+            invalidator_factory,
+            &subject_prefix,
+            invalidator_cancel_for_task,
+        )
+        .await;
+    });
 
     // Serve via stdio
     let transport = rmcp::transport::io::stdio();
@@ -99,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
 
     let service = server.serve(transport).await?;
     service.waiting().await?;
+
+    // Tear down the invalidator before exit.
+    invalidator_cancel.cancel();
+    let _ = invalidator_handle.await;
 
     tracing::info!("huly-mcp stopped");
 

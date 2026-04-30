@@ -209,6 +209,43 @@ mod tests {
     }
 
     #[test]
+    fn tx_create_doc_uses_modified_by_for_created_by_too() {
+        let tx = tx_create_doc(
+            "x",
+            "core:class:Foo",
+            "sp",
+            "soc-99",
+            json!({"k": "v"}),
+        );
+        assert_eq!(tx["modifiedBy"], "soc-99");
+        assert_eq!(tx["createdBy"], "soc-99");
+    }
+
+    #[test]
+    fn tx_collection_create_carries_collection_fields() {
+        let tx = tx_collection_create(
+            "obj",
+            "core:class:Issue",
+            "sp",
+            "parent",
+            "core:class:Parent",
+            "items",
+            "soc",
+            json!({}),
+        );
+        assert_eq!(tx["collection"], "items");
+        assert_eq!(tx["attachedTo"], "parent");
+        assert_eq!(tx["attachedToClass"], "core:class:Parent");
+    }
+
+    #[test]
+    fn tx_update_doc_carries_operations_object_verbatim() {
+        let ops = json!({"$set": {"title": "x"}, "$unset": ["foo"]});
+        let tx = tx_update_doc("o", "c", "s", "soc", ops.clone());
+        assert_eq!(tx["operations"], ops);
+    }
+
+    #[test]
     fn gen_tx_id_produces_unique_ids() {
         let ids: std::collections::HashSet<String> = (0..20).map(|_| gen_tx_id()).collect();
         assert_eq!(ids.len(), 20, "all IDs must be distinct");

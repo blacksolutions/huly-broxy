@@ -1,0 +1,46 @@
+# Per-workspace bridge config.
+#
+# Layout: /etc/huly-bridge/workspaces.d/<workspace>.toml
+# One file per workspace. The systemd template unit `huly-bridge@<ws>.service`
+# locates this file via its `%i` instance name (see systemd/huly-bridge@.service).
+#
+# Filename MUST match `[huly] workspace`. The supervisor and operator runbooks
+# rely on this convention for journalctl + status lookups.
+
+[huly]
+url = "https://huly.example.com"
+# Filename muhasebot.toml -> workspace = "muhasebot".
+workspace = "muhasebot"
+accounts_url = "https://huly.example.com/_accounts"
+use_binary_protocol = false
+use_compression = true
+reconnect_delay_ms = 1000
+ping_interval_secs = 10
+
+[huly.auth]
+method = "password"
+email = "user@example.com"
+password = "REPLACE_ME"
+
+# Or token-based:
+# [huly.auth]
+# method = "token"
+# token = "your-jwt-here"
+
+[nats]
+url = "nats://127.0.0.1:4222"
+subject_prefix = "huly"
+
+[admin]
+host = "0.0.0.0"
+# Each per-workspace instance MUST bind a unique admin port on the host.
+port = 9095
+# Routable URL announced over NATS to MCP clients. REQUIRED when host is a
+# wildcard. Bridge refuses to start otherwise.
+advertise_url = "http://10.0.0.5:9095"
+# Bearer token for /api/v1/* endpoints. Must match mcp.bridge_api_token.
+api_token = "change-me"
+
+[log]
+level = "info"
+json = false

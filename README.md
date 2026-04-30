@@ -563,17 +563,17 @@ Errors are classified into two categories to determine retry behavior:
 
 ### Unit File
 
-See [`systemd/huly-bridge.service`](systemd/huly-bridge.service) for the full unit file.
+See [`systemd/huly-bridge@.service`](systemd/huly-bridge@.service) for the full unit file. It's a template — one instance per workspace, spawned as `huly-bridge@<workspace>.service`.
 
 **Key settings:**
 
 ```ini
-Type=notify          # Uses sd_notify for readiness
-WatchdogSec=30s      # Watchdog timeout (pinged every 10s)
+Type=simple
 Restart=on-failure
-RestartSec=5s
-DynamicUser=yes      # Security hardening
+RestartSec=2s
+DynamicUser=yes      # Security hardening (per-instance dynamic user)
 ProtectSystem=strict
+ReadOnlyPaths=/etc/huly-bridge
 NoNewPrivileges=yes
 MemoryMax=512M
 ```
@@ -616,20 +616,23 @@ cargo build --release
 # Install binary
 sudo cp target/release/huly-bridge /usr/local/bin/
 
-# Install config
-sudo mkdir -p /etc/huly-bridge
-sudo cp config/bridge.example.toml /etc/huly-bridge/bridge.toml
-# Edit /etc/huly-bridge/bridge.toml with your settings
+# Install config (one file per workspace; filename = workspace name)
+sudo install -d -m 0755 /etc/huly-bridge/workspaces.d
+sudo cp config/workspaces.d/muhasebot.toml.example \
+        /etc/huly-bridge/workspaces.d/muhasebot.toml
+# Edit /etc/huly-bridge/workspaces.d/muhasebot.toml with your settings
 
-# Install systemd unit
-sudo cp systemd/huly-bridge.service /etc/systemd/system/
+# Install systemd template unit (one template, N instances)
+sudo cp systemd/huly-bridge@.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now huly-bridge
+sudo systemctl enable --now huly-bridge@muhasebot.service
 
 # Check status
-sudo systemctl status huly-bridge
-sudo journalctl -u huly-bridge -f
+sudo systemctl status huly-bridge@muhasebot.service
+sudo journalctl -u huly-bridge@muhasebot.service -f
 ```
+
+See [`docs/operations/migration-per-workspace.md`](docs/operations/migration-per-workspace.md) when upgrading from a pre-P6 single-instance bridge.
 
 ---
 
@@ -669,10 +672,12 @@ huly-kube/
         mcp/catalog.rs           # Card-type / status / relation enum ↔ ID maps (overridable)
       tests/fixtures/            # Stub sync subprocess scripts
   config/
-    bridge.example.toml
+    bridge.example.toml          # legacy single-instance shape (reference)
     mcp.example.toml
+    workspaces.d/
+      muhasebot.toml.example     # per-workspace bridge config (P6 layout)
   systemd/
-    huly-bridge.service
+    huly-bridge@.service         # template unit; one instance per workspace
 ```
 
 ## Testing

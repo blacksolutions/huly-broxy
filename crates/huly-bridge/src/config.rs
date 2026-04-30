@@ -1,3 +1,4 @@
+use huly_common::announcement::{extract_host, is_unspecified_host};
 use secrecy::SecretString;
 use serde::Deserialize;
 use std::path::Path;
@@ -159,25 +160,6 @@ impl AdminConfig {
             }
         }
         Ok(())
-    }
-}
-
-fn is_unspecified_host(host: &str) -> bool {
-    let trimmed = host.trim().trim_matches(|c| c == '[' || c == ']');
-    matches!(trimmed, "0.0.0.0" | "::" | "0:0:0:0:0:0:0:0")
-}
-
-fn extract_host(url: &str) -> &str {
-    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    if let Some(rest) = authority.strip_prefix('[') {
-        rest.split_once(']').map(|(h, _)| h).unwrap_or(rest)
-    } else {
-        authority.split(':').next().unwrap_or(authority)
     }
 }
 
@@ -450,17 +432,6 @@ mod tests {
             api_token: None,
         };
         admin.validate().expect("hostname advertise_url should pass");
-    }
-
-    #[test]
-    fn extract_host_handles_ipv6_with_port() {
-        assert_eq!(extract_host("http://[::1]:9095/path"), "::1");
-        assert_eq!(extract_host("http://[::]:9095"), "::");
-    }
-
-    #[test]
-    fn extract_host_handles_userinfo() {
-        assert_eq!(extract_host("http://user:pw@host.example:9095/"), "host.example");
     }
 
     #[test]

@@ -131,6 +131,24 @@ impl BridgeRegistry {
     }
 }
 
+/// Update the registry with an announcement, after rejecting payloads
+/// the consumer cannot use. Currently filters announcements whose
+/// `proxy_url` has an unspecified host (`0.0.0.0` / `::`) — those are
+/// bind addresses, not routable from this MCP host. Bridge-side
+/// validation (huly-bridge::config) now refuses to publish them, but
+/// older bridges and misconfigured deployments still might.
+async fn ingest_announcement(registry: &BridgeRegistry, announcement: BridgeAnnouncement) {
+    if !announcement.has_routable_proxy_url() {
+        warn!(
+            workspace = %announcement.workspace,
+            proxy_url = %announcement.proxy_url,
+            "skipping bridge announcement: proxy_url has unspecified host (bind wildcard); set advertise_url on the bridge"
+        );
+        return;
+    }
+    registry.update(announcement).await;
+}
+
 /// Subscribe to bridge announcements on NATS and update the registry.
 pub async fn run_subscriber(
     client: async_nats::Client,
@@ -165,7 +183,7 @@ pub async fn run_subscriber(
                                     ready = announcement.ready,
                                     "received bridge announcement"
                                 );
-                                registry.update(announcement).await;
+                                ingest_announcement(&registry, announcement).await;
                             }
                             Err(e) => {
                                 warn!(error = %e, "failed to parse bridge announcement");
@@ -229,6 +247,14 @@ pub async fn seed_via_lookup(
         match tokio::time::timeout(remaining, subscription.next()).await {
             Ok(Some(msg)) => match serde_json::from_slice::<BridgeAnnouncement>(&msg.payload) {
                 Ok(announcement) => {
+                    if !announcement.has_routable_proxy_url() {
+                        warn!(
+                            workspace = %announcement.workspace,
+                            proxy_url = %announcement.proxy_url,
+                            "lookup seed: skipping bridge with unspecified proxy_url host"
+                        );
+                        continue;
+                    }
                     info!(
                         workspace = %announcement.workspace,
                         ready = announcement.ready,
@@ -438,6 +464,33 @@ mod tests {
         registry.wait_for_any(Duration::from_millis(500)).await;
         assert!(start.elapsed() < Duration::from_millis(200));
         assert_eq!(registry.list_workspaces().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingest_skips_wildcard_proxy_url() {
+        let registry = BridgeRegistry::new();
+        let mut a = ann("ws-bad");
+        a.proxy_url = "http://0.0.0.0:9095".into();
+        ingest_announcement(&registry, a).await;
+        assert!(registry.get("ws-bad").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest_skips_ipv6_wildcard_proxy_url() {
+        let registry = BridgeRegistry::new();
+        let mut a = ann("ws-bad");
+        a.proxy_url = "http://[::]:9095".into();
+        ingest_announcement(&registry, a).await;
+        assert!(registry.get("ws-bad").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest_accepts_routable_proxy_url() {
+        let registry = BridgeRegistry::new();
+        let mut a = ann("ws-good");
+        a.proxy_url = "http://192.168.0.10:9095".into();
+        ingest_announcement(&registry, a).await;
+        assert!(registry.get("ws-good").await.is_some());
     }
 
     #[tokio::test]

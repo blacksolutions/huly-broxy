@@ -53,6 +53,34 @@ pub struct WorkspaceSchemaResponse {
     pub schema: WorkspaceSchema,
 }
 
+/// True if `host` is an IPv4/IPv6 unspecified ("any") address — `0.0.0.0`,
+/// `::`, or their textual variants. These are valid bind addresses but
+/// cannot be dialed by clients on other hosts.
+pub fn is_unspecified_host(host: &str) -> bool {
+    let trimmed = host.trim().trim_matches(|c| c == '[' || c == ']');
+    matches!(trimmed, "0.0.0.0" | "::" | "0:0:0:0:0:0:0:0")
+}
+
+/// Best-effort extraction of the host portion from a URL string. Handles
+/// `scheme://`, userinfo, IPv6 brackets, and trailing path/query/fragment.
+/// Not a full parser — intended for the unspecified-host check above.
+pub fn extract_host(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    if let Some(rest) = authority.strip_prefix('[') {
+        rest.split_once(']').map(|(h, _)| h).unwrap_or(rest)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    }
+}
+
 /// Bridge announcement published periodically to NATS for discovery
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeAnnouncement {
@@ -80,6 +108,16 @@ pub struct BridgeAnnouncement {
     /// Optional on the wire so older bridges keep parsing.
     #[serde(default)]
     pub schema_version: u64,
+}
+
+impl BridgeAnnouncement {
+    /// True iff `proxy_url`'s host is dialable from another machine —
+    /// i.e. not a wildcard bind address. Consumers (huly-mcp) should
+    /// skip announcements that fail this check; the bridge would never
+    /// be reachable over HTTP from a different host.
+    pub fn has_routable_proxy_url(&self) -> bool {
+        !is_unspecified_host(extract_host(&self.proxy_url))
+    }
 }
 
 #[cfg(test)]
@@ -168,6 +206,57 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let parsed: WorkspaceSchema = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn is_unspecified_host_matches_wildcards() {
+        assert!(is_unspecified_host("0.0.0.0"));
+        assert!(is_unspecified_host("::"));
+        assert!(is_unspecified_host("[::]"));
+        assert!(is_unspecified_host("0:0:0:0:0:0:0:0"));
+        assert!(is_unspecified_host(" 0.0.0.0 "));
+    }
+
+    #[test]
+    fn is_unspecified_host_rejects_routable() {
+        assert!(!is_unspecified_host("127.0.0.1"));
+        assert!(!is_unspecified_host("192.168.0.10"));
+        assert!(!is_unspecified_host("bridge.internal"));
+        assert!(!is_unspecified_host("::1"));
+    }
+
+    #[test]
+    fn extract_host_handles_common_url_shapes() {
+        assert_eq!(extract_host("http://192.168.0.10:9095"), "192.168.0.10");
+        assert_eq!(extract_host("http://0.0.0.0:9095/api/v1/find"), "0.0.0.0");
+        assert_eq!(extract_host("http://[::]:9095/path"), "::");
+        assert_eq!(extract_host("http://[::1]:9095"), "::1");
+        assert_eq!(
+            extract_host("http://user:pw@host.example:9095/"),
+            "host.example"
+        );
+        assert_eq!(extract_host("https://bridge.internal/"), "bridge.internal");
+    }
+
+    #[test]
+    fn has_routable_proxy_url_rejects_wildcards() {
+        let mut ann = BridgeAnnouncement {
+            workspace: "ws".into(),
+            proxy_url: "http://0.0.0.0:9095".into(),
+            huly_connected: true,
+            nats_connected: true,
+            ready: true,
+            uptime_secs: 0,
+            version: "0.1.0".into(),
+            timestamp: 0,
+            social_id: None,
+            schema_version: 0,
+        };
+        assert!(!ann.has_routable_proxy_url());
+        ann.proxy_url = "http://[::]:9095".into();
+        assert!(!ann.has_routable_proxy_url());
+        ann.proxy_url = "http://192.168.0.10:9095".into();
+        assert!(ann.has_routable_proxy_url());
     }
 
     #[test]

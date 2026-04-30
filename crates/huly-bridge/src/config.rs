@@ -11,6 +11,36 @@ pub struct BridgeConfig {
     pub admin: AdminConfig,
     #[serde(default)]
     pub log: LogConfig,
+    /// Per-workspace credentials the JWT broker uses to mint workspace tokens
+    /// for MCP clients. One entry per workspace this bridge is authoritative
+    /// for. Requests for workspaces not listed here return `unknown_workspace`
+    /// — the primary `[huly]` block is the bridge's own session for events
+    /// and is **not** a fallback for the broker.
+    #[serde(default, rename = "workspace_credentials")]
+    pub workspace_credentials: Vec<WorkspaceCredential>,
+}
+
+/// One mintable workspace. `password` and `token` are mutually exclusive —
+/// configs that supply neither (or both) are rejected at load time.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspaceCredential {
+    /// Human-readable workspace slug. Matches `MintRequest.workspace`.
+    pub workspace: String,
+    /// Account email used to log into the accounts service.
+    pub email: String,
+    /// Account password (mutually exclusive with `token`).
+    #[serde(default)]
+    pub password: Option<SecretString>,
+    /// Pre-issued account-scoped token (mutually exclusive with `password`).
+    #[serde(default)]
+    pub token: Option<SecretString>,
+    /// Optional override of the default workspace JWT lifetime, in seconds.
+    /// Brokers can't introspect upstream JWT `exp` reliably across deploys
+    /// (Huly Cloud and self-hosted issue different shapes), so the broker
+    /// declares a conservative lifetime to MCP via `expires_at_ms`. Default
+    /// 3600s.
+    #[serde(default)]
+    pub jwt_ttl_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,7 +203,53 @@ impl BridgeConfig {
         let content = std::fs::read_to_string(path)?;
         let config: BridgeConfig = toml::from_str(&content)?;
         config.admin.validate()?;
+        config.validate_workspace_credentials()?;
         Ok(config)
+    }
+
+    /// Reject misconfigured credential entries early. Each entry must:
+    /// - have exactly one of `password` / `token`, and
+    /// - have a unique `workspace` slug across the array.
+    ///
+    /// Also enforces the P3 invariant: the workspace named in `[huly]`
+    /// must be mintable. Either it appears explicitly in
+    /// `workspace_credentials` or — for single-tenant deployments — the
+    /// array is empty and the bridge will mint via `[huly].auth`. Any
+    /// other shape (non-empty array that omits `[huly].workspace`) is a
+    /// configuration bug because the bridge would advertise a workspace
+    /// it cannot mint for.
+    fn validate_workspace_credentials(&self) -> anyhow::Result<()> {
+        use std::collections::HashSet;
+        let mut seen: HashSet<&str> = HashSet::new();
+        for entry in &self.workspace_credentials {
+            if !seen.insert(entry.workspace.as_str()) {
+                anyhow::bail!(
+                    "[[workspace_credentials]] duplicate workspace slug: {}",
+                    entry.workspace
+                );
+            }
+            match (&entry.password, &entry.token) {
+                (Some(_), Some(_)) => anyhow::bail!(
+                    "[[workspace_credentials]] for {}: set exactly one of `password`/`token`, not both",
+                    entry.workspace
+                ),
+                (None, None) => anyhow::bail!(
+                    "[[workspace_credentials]] for {}: must set either `password` or `token`",
+                    entry.workspace
+                ),
+                _ => {}
+            }
+        }
+        if !self.workspace_credentials.is_empty()
+            && !seen.contains(self.huly.workspace.as_str())
+        {
+            anyhow::bail!(
+                "[[workspace_credentials]] is set but does not include the bridge's primary workspace `{}` — \
+                 add an entry for it or remove the array entirely (single-tenant fallback)",
+                self.huly.workspace
+            );
+        }
+        Ok(())
     }
 }
 
@@ -428,6 +504,138 @@ mod tests {
             api_token: None,
         };
         admin.validate().expect("hostname advertise_url should pass");
+    }
+
+    #[test]
+    fn parse_workspace_credentials_array() {
+        let toml = r#"
+            [huly]
+            url = "https://huly.example.com"
+            workspace = "primary"
+
+            [huly.auth]
+            method = "token"
+            token = "tok"
+
+            [nats]
+
+            [[workspace_credentials]]
+            workspace = "primary"
+            email = "p@example.com"
+            password = "p1"
+
+            [[workspace_credentials]]
+            workspace = "secondary"
+            email = "s@example.com"
+            token = "acct-tok"
+            jwt_ttl_secs = 7200
+        "#;
+        let config: BridgeConfig = toml::from_str(toml).unwrap();
+        config.validate_workspace_credentials().unwrap();
+        assert_eq!(config.workspace_credentials.len(), 2);
+        assert_eq!(config.workspace_credentials[0].workspace, "primary");
+        assert!(config.workspace_credentials[0].password.is_some());
+        assert_eq!(config.workspace_credentials[1].jwt_ttl_secs, Some(7200));
+    }
+
+    #[test]
+    fn workspace_credentials_default_to_empty() {
+        let toml = r#"
+            [huly]
+            url = "https://huly.example.com"
+            workspace = "ws1"
+            [huly.auth]
+            method = "token"
+            token = "tok"
+            [nats]
+        "#;
+        let config: BridgeConfig = toml::from_str(toml).unwrap();
+        assert!(config.workspace_credentials.is_empty());
+        config.validate_workspace_credentials().unwrap();
+    }
+
+    #[test]
+    fn workspace_credentials_reject_both_password_and_token() {
+        let toml = r#"
+            [huly]
+            url = "https://huly.example.com"
+            workspace = "primary"
+            [huly.auth]
+            method = "token"
+            token = "tok"
+            [nats]
+            [[workspace_credentials]]
+            workspace = "primary"
+            email = "p@example.com"
+            password = "p1"
+            token = "t1"
+        "#;
+        let config: BridgeConfig = toml::from_str(toml).unwrap();
+        let err = config.validate_workspace_credentials().unwrap_err().to_string();
+        assert!(err.contains("exactly one"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_credentials_reject_neither_password_nor_token() {
+        let toml = r#"
+            [huly]
+            url = "https://huly.example.com"
+            workspace = "primary"
+            [huly.auth]
+            method = "token"
+            token = "tok"
+            [nats]
+            [[workspace_credentials]]
+            workspace = "primary"
+            email = "p@example.com"
+        "#;
+        let config: BridgeConfig = toml::from_str(toml).unwrap();
+        let err = config.validate_workspace_credentials().unwrap_err().to_string();
+        assert!(err.contains("must set either"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_credentials_reject_duplicate_slugs() {
+        let toml = r#"
+            [huly]
+            url = "https://huly.example.com"
+            workspace = "primary"
+            [huly.auth]
+            method = "token"
+            token = "tok"
+            [nats]
+            [[workspace_credentials]]
+            workspace = "primary"
+            email = "a@example.com"
+            password = "p"
+            [[workspace_credentials]]
+            workspace = "primary"
+            email = "b@example.com"
+            password = "q"
+        "#;
+        let config: BridgeConfig = toml::from_str(toml).unwrap();
+        let err = config.validate_workspace_credentials().unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_credentials_must_include_primary_workspace_when_set() {
+        let toml = r#"
+            [huly]
+            url = "https://huly.example.com"
+            workspace = "primary"
+            [huly.auth]
+            method = "token"
+            token = "tok"
+            [nats]
+            [[workspace_credentials]]
+            workspace = "secondary"
+            email = "s@example.com"
+            password = "s"
+        "#;
+        let config: BridgeConfig = toml::from_str(toml).unwrap();
+        let err = config.validate_workspace_credentials().unwrap_err().to_string();
+        assert!(err.contains("primary"), "got: {err}");
     }
 
     #[test]

@@ -4,9 +4,10 @@ use crate::admin::platform_api::PlatformClientHandle;
 use crate::admin::router::{AppState, create_router};
 use crate::bridge::announcer::{self, SocialIdHandle};
 use crate::bridge::event_loop;
+use crate::bridge::mint_responder::{self, AccountsLogin, MintBrokerConfig};
 use crate::bridge::nats_publisher::{EventPublisher, NatsPublisher};
 use huly_client::schema_resolver::{self, SchemaHandle};
-use crate::config::{AuthConfig, BridgeConfig};
+use crate::config::{AuthConfig, BridgeConfig, WorkspaceCredential};
 use huly_client::accounts::{AccountsClient, AccountsError, WorkspaceLoginInfo, pick_primary_social_id};
 use huly_client::auth;
 use huly_client::client::{HulyClient, PlatformClient};
@@ -92,6 +93,11 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let reconnect_delay_ms = config.huly.reconnect_delay_ms;
     let tls_skip_verify = config.huly.tls_skip_verify;
     let tls_ca_cert = config.huly.tls_ca_cert.clone();
+    // Snapshot the credentials the JWT broker will mint for. Done now so the
+    // subsequent partial moves out of `config` (e.g. `nats.subject_prefix`)
+    // don't poison the borrow.
+    let mint_creds = effective_workspace_credentials(&config);
+    let mint_rest_base_url = format!("{}/api/v1", config.huly.url.trim_end_matches('/'));
     let subject_prefix = config
         .nats
         .subject_prefix
@@ -100,6 +106,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let nats_client_for_announcer = publisher.client().clone();
     let nats_client_for_lookup = publisher.client().clone();
     let nats_client_for_schema = publisher.client().clone();
+    let nats_client_for_mint = publisher.client().clone();
     let publisher = Arc::new(publisher) as Arc<dyn EventPublisher>;
     let publisher_ref = publisher.clone();
 
@@ -193,6 +200,23 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             lookup_social_id,
             lookup_schema,
             lookup_cancel,
+        )
+        .await;
+    });
+
+    // Start JWT broker — listens on `huly.bridge.mint`. Runs from boot
+    // (does NOT depend on the WS connect loop) so MCP can mint cold-start
+    // tokens even while the bridge's own WS session is reconnecting.
+    let mint_cfg = MintBrokerConfig::from_credentials(mint_rest_base_url, &mint_creds)
+        .map_err(|e| anyhow::anyhow!("mint broker config: {e}"))?;
+    let mint_accounts: Arc<dyn AccountsLogin> = Arc::new(accounts.clone());
+    let mint_cancel = cancel.clone();
+    let mint_handle = tokio::spawn(async move {
+        mint_responder::run_mint_responder(
+            nats_client_for_mint,
+            mint_cfg,
+            mint_accounts,
+            mint_cancel,
         )
         .await;
     });
@@ -402,6 +426,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(5), announcer_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), lookup_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), schema_handle_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), mint_handle).await;
 
     info!("service stopped");
     Ok(())
@@ -425,6 +450,51 @@ fn to_ws_scheme(url: &str) -> String {
         base.replacen("http://", "ws://", 1)
     } else {
         format!("wss://{base}")
+    }
+}
+
+/// Resolve the credentials the JWT broker should serve.
+///
+/// Multi-tenant deployments enumerate one entry per workspace under
+/// `[[workspace_credentials]]`. Single-tenant deployments leave the array
+/// empty; we synthesize an entry from `[huly]` so the broker can mint for
+/// the bridge's primary workspace without operators duplicating config.
+fn effective_workspace_credentials(config: &BridgeConfig) -> Vec<WorkspaceCredential> {
+    if !config.workspace_credentials.is_empty() {
+        // Re-borrow into owned entries — we can't move out of `config` because
+        // the WS reconnect loop still needs it. The borrow is paid once at
+        // startup; the broker holds an Arc'd map afterwards.
+        return config
+            .workspace_credentials
+            .iter()
+            .map(|c| WorkspaceCredential {
+                workspace: c.workspace.clone(),
+                email: c.email.clone(),
+                password: c.password.clone(),
+                token: c.token.clone(),
+                jwt_ttl_secs: c.jwt_ttl_secs,
+            })
+            .collect();
+    }
+    // Single-tenant fallback: derive a one-entry credential from `[huly]`.
+    // Token-auth sessions don't carry the email, so we substitute a placeholder
+    // — `email` is only used when `auth = password`, and the synthesized
+    // entry inherits whichever shape `[huly].auth` had.
+    match &config.huly.auth {
+        AuthConfig::Token { token } => vec![WorkspaceCredential {
+            workspace: config.huly.workspace.clone(),
+            email: String::new(),
+            password: None,
+            token: Some(token.clone()),
+            jwt_ttl_secs: None,
+        }],
+        AuthConfig::Password { email, password } => vec![WorkspaceCredential {
+            workspace: config.huly.workspace.clone(),
+            email: email.clone(),
+            password: Some(password.clone()),
+            token: None,
+            jwt_ttl_secs: None,
+        }],
     }
 }
 

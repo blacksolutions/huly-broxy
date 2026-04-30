@@ -342,21 +342,21 @@ fn validate_proxy_url(url: &str) -> Result<(), String> {
 impl HulyMcpServer {
     /// List all discovered Huly workspaces and their bridge status.
     #[tool(name = "huly_list_workspaces", description = "List all discovered Huly workspaces and their bridge connection status")]
-    async fn list_workspaces(&self, _params: Parameters<ListWorkspacesParams>) -> String {
+    async fn list_workspaces(&self, _params: Parameters<ListWorkspacesParams>) -> Result<String, String> {
         let mut workspaces = self.registry.list_workspaces().await;
         if workspaces.is_empty() {
             self.registry.wait_for_any(COLD_START_WAIT).await;
             workspaces = self.registry.list_workspaces().await;
         }
         if workspaces.is_empty() {
-            return "No workspaces discovered. Ensure bridge instances are running and connected to NATS.".to_string();
+            return Err("No workspaces discovered. Ensure bridge instances are running and connected to NATS.".to_string());
         }
-        serde_json::to_string_pretty(&workspaces).unwrap_or_else(|e| format!("Error: {e}"))
+        serde_json::to_string_pretty(&workspaces).map_err(|e| format!("{e}"))
     }
 
     /// Get the status of a specific workspace or all workspaces.
     #[tool(name = "huly_status", description = "Get bridge status for a specific workspace or all workspaces")]
-    async fn status(&self, Parameters(params): Parameters<StatusParams>) -> String {
+    async fn status(&self, Parameters(params): Parameters<StatusParams>) -> Result<String, String> {
         match params.workspace {
             Some(ws) => {
                 let ann = match self.registry.get(&ws).await {
@@ -364,8 +364,8 @@ impl HulyMcpServer {
                     None => self.registry.wait_for_workspace(&ws, COLD_START_WAIT).await,
                 };
                 match ann {
-                    Some(a) => serde_json::to_string_pretty(&a).unwrap_or_else(|e| format!("Error: {e}")),
-                    None => format!("Workspace '{}' not found", ws),
+                    Some(a) => serde_json::to_string_pretty(&a).map_err(|e| format!("{e}")),
+                    None => Err(format!("Workspace '{}' not found", ws)),
                 }
             }
             None => {
@@ -374,18 +374,15 @@ impl HulyMcpServer {
                     self.registry.wait_for_any(COLD_START_WAIT).await;
                     workspaces = self.registry.list_workspaces().await;
                 }
-                serde_json::to_string_pretty(&workspaces).unwrap_or_else(|e| format!("Error: {e}"))
+                serde_json::to_string_pretty(&workspaces).map_err(|e| format!("{e}"))
             }
         }
     }
 
     /// Find documents in a Huly workspace by class and query filter.
     #[tool(name = "huly_find", description = "Find documents in a Huly workspace. Returns matching documents with total count.")]
-    async fn find(&self, Parameters(params): Parameters<FindParams>) -> String {
-        let proxy_url = match self.resolve_proxy_url(&params.workspace).await {
-            Ok(url) => url,
-            Err(e) => return e,
-        };
+    async fn find(&self, Parameters(params): Parameters<FindParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_proxy_url(&params.workspace).await?;
 
         let options = params.limit.map(|limit| huly_common::types::FindOptions {
             limit: Some(limit),
@@ -393,65 +390,53 @@ impl HulyMcpServer {
         });
 
         match self.http_client.find(&proxy_url, &params.class, params.query, options).await {
-            Ok(result) => serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}")),
-            Err(e) => format!("Error: {e}"),
+            Ok(result) => serde_json::to_string_pretty(&result).map_err(|e| format!("{e}")),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
     /// Get a single document from a Huly workspace.
     #[tool(name = "huly_get", description = "Get a single document from a Huly workspace by class and query.")]
-    async fn get(&self, Parameters(params): Parameters<GetParams>) -> String {
-        let proxy_url = match self.resolve_proxy_url(&params.workspace).await {
-            Ok(url) => url,
-            Err(e) => return e,
-        };
+    async fn get(&self, Parameters(params): Parameters<GetParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_proxy_url(&params.workspace).await?;
 
         match self.http_client.find_one(&proxy_url, &params.class, params.query).await {
-            Ok(Some(doc)) => serde_json::to_string_pretty(&doc).unwrap_or_else(|e| format!("Error: {e}")),
-            Ok(None) => "null".to_string(),
-            Err(e) => format!("Error: {e}"),
+            Ok(Some(doc)) => serde_json::to_string_pretty(&doc).map_err(|e| format!("{e}")),
+            Ok(None) => Ok("null".to_string()),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
     /// Create a new document in a Huly workspace.
     #[tool(name = "huly_create", description = "Create a new document in a Huly workspace. Returns the created document ID.")]
-    async fn create(&self, Parameters(params): Parameters<CreateParams>) -> String {
-        let proxy_url = match self.resolve_proxy_url(&params.workspace).await {
-            Ok(url) => url,
-            Err(e) => return e,
-        };
+    async fn create(&self, Parameters(params): Parameters<CreateParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_proxy_url(&params.workspace).await?;
 
         match self.http_client.create(&proxy_url, &params.class, &params.space, params.attributes).await {
-            Ok(id) => serde_json::json!({"id": id}).to_string(),
-            Err(e) => format!("Error: {e}"),
+            Ok(id) => Ok(serde_json::json!({"id": id}).to_string()),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
     /// Update a document in a Huly workspace.
     #[tool(name = "huly_update", description = "Update an existing document in a Huly workspace.")]
-    async fn update(&self, Parameters(params): Parameters<UpdateParams>) -> String {
-        let proxy_url = match self.resolve_proxy_url(&params.workspace).await {
-            Ok(url) => url,
-            Err(e) => return e,
-        };
+    async fn update(&self, Parameters(params): Parameters<UpdateParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_proxy_url(&params.workspace).await?;
 
         match self.http_client.update(&proxy_url, &params.class, &params.space, &params.id, params.operations).await {
-            Ok(result) => serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}")),
-            Err(e) => format!("Error: {e}"),
+            Ok(result) => serde_json::to_string_pretty(&result).map_err(|e| format!("{e}")),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
     /// Delete a document from a Huly workspace.
     #[tool(name = "huly_delete", description = "Delete a document from a Huly workspace.")]
-    async fn delete(&self, Parameters(params): Parameters<DeleteParams>) -> String {
-        let proxy_url = match self.resolve_proxy_url(&params.workspace).await {
-            Ok(url) => url,
-            Err(e) => return e,
-        };
+    async fn delete(&self, Parameters(params): Parameters<DeleteParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_proxy_url(&params.workspace).await?;
 
         match self.http_client.delete(&proxy_url, &params.class, &params.space, &params.id).await {
-            Ok(result) => serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}")),
-            Err(e) => format!("Error: {e}"),
+            Ok(result) => serde_json::to_string_pretty(&result).map_err(|e| format!("{e}")),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
@@ -459,14 +444,11 @@ impl HulyMcpServer {
         name = "huly_discover",
         description = "List workspace structure: Tracker projects, components, card types (MasterTags), associations, and issue status categories. Call this first to understand what exists in a workspace."
     )]
-    async fn discover(&self, Parameters(params): Parameters<DiscoverParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+    async fn discover(&self, Parameters(params): Parameters<DiscoverParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_optional_workspace(params.workspace.as_deref()).await?;
         match tools::discover(&self.http_client, &proxy_url).await {
-            Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|e| format!("Error: {e}")),
-            Err(e) => e,
+            Ok(v) => serde_json::to_string_pretty(&v).map_err(|e| format!("{e}")),
+            Err(e) => Err(e),
         }
     }
 
@@ -474,15 +456,9 @@ impl HulyMcpServer {
         name = "huly_find_cards",
         description = "Find cards by MasterTag name. Names are workspace-local — call huly_discover to list what exists. Pass `kind` to fetch a specific MasterTag, omit to enumerate all known kinds in the workspace."
     )]
-    async fn find_cards(&self, Parameters(params): Parameters<FindCardsParams>) -> String {
-        let workspace = match tools::resolve_workspace(&self.registry, params.workspace.as_deref()).await {
-            Ok(ws) => ws,
-            Err(e) => return e,
-        };
-        let proxy_url = match self.resolve_proxy_url(&workspace).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+    async fn find_cards(&self, Parameters(params): Parameters<FindCardsParams>) -> Result<String, String> {
+        let workspace = tools::resolve_workspace(&self.registry, params.workspace.as_deref()).await?;
+        let proxy_url = self.resolve_proxy_url(&workspace).await?;
         let limit = params.limit.clamp(1, 100) as u64;
         match tools::find_cards(
             &self.http_client,
@@ -496,8 +472,8 @@ impl HulyMcpServer {
         )
         .await
         {
-            Ok(cards) => tools::render_card_summaries(&cards),
-            Err(e) => e,
+            Ok(cards) => Ok(tools::render_card_summaries(&cards)),
+            Err(e) => Err(e),
         }
     }
 
@@ -505,11 +481,8 @@ impl HulyMcpServer {
         name = "huly_find_issues",
         description = "Find tracker issues. Filter by component, status (backlog/todo/inProgress/done/canceled), or title query."
     )]
-    async fn find_issues(&self, Parameters(params): Parameters<FindIssuesParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+    async fn find_issues(&self, Parameters(params): Parameters<FindIssuesParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_optional_workspace(params.workspace.as_deref()).await?;
         let limit = params.limit.clamp(1, 200) as u64;
         match tools::find_issues(
             &self.http_client,
@@ -521,8 +494,8 @@ impl HulyMcpServer {
         )
         .await
         {
-            Ok(issues) => tools::render_issue_summaries(&issues),
-            Err(e) => e,
+            Ok(issues) => Ok(tools::render_issue_summaries(&issues)),
+            Err(e) => Err(e),
         }
     }
 
@@ -530,15 +503,12 @@ impl HulyMcpServer {
         name = "huly_get_issue",
         description = "Get a single tracker issue by identifier (e.g. 'MUH-3') with linked relations."
     )]
-    async fn get_issue(&self, Parameters(params): Parameters<GetIssueParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+    async fn get_issue(&self, Parameters(params): Parameters<GetIssueParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_optional_workspace(params.workspace.as_deref()).await?;
         match tools::get_issue(&self.http_client, &proxy_url, &params.identifier).await {
-            Ok(Some(v)) => serde_json::to_string_pretty(&v).unwrap_or_else(|e| format!("Error: {e}")),
-            Ok(None) => format!("Issue {} not found.", params.identifier),
-            Err(e) => e,
+            Ok(Some(v)) => serde_json::to_string_pretty(&v).map_err(|e| format!("{e}")),
+            Ok(None) => Ok(format!("Issue {} not found.", params.identifier)),
+            Err(e) => Err(e),
         }
     }
 
@@ -546,16 +516,10 @@ impl HulyMcpServer {
         name = "huly_create_issue",
         description = "Create a new tracker issue. Accepts markdown in 'description' — it is uploaded to the Huly collaborator service so it renders correctly in the UI. If 'project' is omitted, the only project in the workspace is used (errors if multiple)."
     )]
-    async fn create_issue(&self, Parameters(params): Parameters<CreateIssueParams>) -> String {
+    async fn create_issue(&self, Parameters(params): Parameters<CreateIssueParams>) -> Result<String, String> {
         let (proxy_url, modified_by) =
-            match self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-        let project = match tools::resolve_project(&self.http_client, &proxy_url, params.project.as_deref()).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+            self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await?;
+        let project = tools::resolve_project(&self.http_client, &proxy_url, params.project.as_deref()).await?;
         let desc_md = if params.description.is_empty() {
             None
         } else {
@@ -574,11 +538,11 @@ impl HulyMcpServer {
         )
         .await
         {
-            Ok((id, identifier)) => format!(
+            Ok((id, identifier)) => Ok(format!(
                 "Created issue {}: \"{}\" (ID: {})",
                 identifier, params.title, id
-            ),
-            Err(e) => e,
+            )),
+            Err(e) => Err(e),
         }
     }
 
@@ -586,11 +550,8 @@ impl HulyMcpServer {
         name = "huly_update_issue",
         description = "Update an existing tracker issue by identifier. Only provided fields are changed. 'description' accepts markdown and is uploaded via the Huly collaborator service."
     )]
-    async fn update_issue(&self, Parameters(params): Parameters<UpdateIssueParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+    async fn update_issue(&self, Parameters(params): Parameters<UpdateIssueParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_optional_workspace(params.workspace.as_deref()).await?;
         let identifier = params.identifier.clone();
         match tools::update_issue(
             &self.http_client,
@@ -605,11 +566,11 @@ impl HulyMcpServer {
         .await
         {
             Ok(Some(changed)) if changed.is_empty() => {
-                format!("No changes specified for {}.", identifier)
+                Ok(format!("No changes specified for {}.", identifier))
             }
-            Ok(Some(changed)) => format!("Updated {}: {}", identifier, changed.join(", ")),
-            Ok(None) => format!("Issue {} not found.", identifier),
-            Err(e) => e,
+            Ok(Some(changed)) => Ok(format!("Updated {}: {}", identifier, changed.join(", "))),
+            Ok(None) => Ok(format!("Issue {} not found.", identifier)),
+            Err(e) => Err(e),
         }
     }
 
@@ -617,11 +578,8 @@ impl HulyMcpServer {
         name = "huly_upload_markup",
         description = "Upload markdown to the Huly collaborator service for an object's attribute (e.g. an issue 'description'). Returns the MarkupBlobRef to store on the object. Use this when you need to set rich-text content on a doc that already exists, or when an automated flow needs the ref to embed elsewhere."
     )]
-    async fn upload_markup(&self, Parameters(params): Parameters<UploadMarkupParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+    async fn upload_markup(&self, Parameters(params): Parameters<UploadMarkupParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_optional_workspace(params.workspace.as_deref()).await?;
         match self
             .http_client
             .upload_markup(
@@ -633,8 +591,8 @@ impl HulyMcpServer {
             )
             .await
         {
-            Ok(markup_ref) => serde_json::json!({"ref": markup_ref}).to_string(),
-            Err(e) => format!("Error: {e}"),
+            Ok(markup_ref) => Ok(serde_json::json!({"ref": markup_ref}).to_string()),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
@@ -642,11 +600,8 @@ impl HulyMcpServer {
         name = "huly_fetch_markup",
         description = "Fetch rich-text markup for an object attribute from the Huly collaborator. format='markdown' (default) is human-readable but lossy on round-trip; format='prosemirror' returns the raw ProseMirror JSON and is lossless. Pass sourceRef when you already have the blob reference; otherwise the bridge resolves it from the object."
     )]
-    async fn fetch_markup(&self, Parameters(params): Parameters<FetchMarkupParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
+    async fn fetch_markup(&self, Parameters(params): Parameters<FetchMarkupParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_optional_workspace(params.workspace.as_deref()).await?;
         match self
             .http_client
             .fetch_markup(
@@ -659,8 +614,8 @@ impl HulyMcpServer {
             )
             .await
         {
-            Ok(resp) => serde_json::to_string_pretty(&resp).unwrap_or_else(|e| format!("Error: {e}")),
-            Err(e) => format!("Error: {e}"),
+            Ok(resp) => serde_json::to_string_pretty(&resp).map_err(|e| format!("{e}")),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
@@ -668,16 +623,10 @@ impl HulyMcpServer {
         name = "huly_create_component",
         description = "Create a tracker component in a project. Skips creation if a component with the same label already exists."
     )]
-    async fn create_component(&self, Parameters(params): Parameters<CreateComponentParams>) -> String {
+    async fn create_component(&self, Parameters(params): Parameters<CreateComponentParams>) -> Result<String, String> {
         let (proxy_url, modified_by) =
-            match self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-        let project = match tools::resolve_project(&self.http_client, &proxy_url, params.project.as_deref()).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+            self.resolve_proxy_and_modified_by(params.workspace.as_deref()).await?;
+        let project = tools::resolve_project(&self.http_client, &proxy_url, params.project.as_deref()).await?;
         match tools::create_component(
             &self.http_client,
             &proxy_url,
@@ -688,14 +637,14 @@ impl HulyMcpServer {
         )
         .await
         {
-            Ok(tools::ComponentResult::Existing { id, label }) => format!(
+            Ok(tools::ComponentResult::Existing { id, label }) => Ok(format!(
                 "Component \"{}\" already exists (ID: {}). Skipped.",
                 label, id
-            ),
+            )),
             Ok(tools::ComponentResult::Created { id, label }) => {
-                format!("Created component \"{}\" (ID: {})", label, id)
+                Ok(format!("Created component \"{}\" (ID: {})", label, id))
             }
-            Err(e) => e,
+            Err(e) => Err(e),
         }
     }
 
@@ -703,16 +652,10 @@ impl HulyMcpServer {
         name = "huly_link_issue_to_card",
         description = "Link an issue to a card via a workspace-local Association (e.g. \"module\"). Use huly_discover to list available relations."
     )]
-    async fn link_issue_to_card(&self, Parameters(params): Parameters<LinkIssueToCardParams>) -> String {
-        let workspace = match tools::resolve_workspace(&self.registry, params.workspace.as_deref()).await {
-            Ok(ws) => ws,
-            Err(e) => return e,
-        };
+    async fn link_issue_to_card(&self, Parameters(params): Parameters<LinkIssueToCardParams>) -> Result<String, String> {
+        let workspace = tools::resolve_workspace(&self.registry, params.workspace.as_deref()).await?;
         let (proxy_url, modified_by) =
-            match self.resolve_proxy_and_modified_by(Some(&workspace)).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
+            self.resolve_proxy_and_modified_by(Some(&workspace)).await?;
         let issue_ident = params.issue_identifier.clone();
         let card_id = params.card_id.clone();
         let relation = params.relation.clone();
@@ -729,16 +672,16 @@ impl HulyMcpServer {
         )
         .await
         {
-            Ok(tools::LinkResult::IssueNotFound) => format!("Issue {} not found.", issue_ident),
-            Ok(tools::LinkResult::AlreadyLinked { id }) => format!(
+            Ok(tools::LinkResult::IssueNotFound) => Ok(format!("Issue {} not found.", issue_ident)),
+            Ok(tools::LinkResult::AlreadyLinked { id }) => Ok(format!(
                 "Relation already exists between {} and card {} ({}). Skipped. Existing relation ID: {}",
                 issue_ident, card_id, relation, id
-            ),
-            Ok(tools::LinkResult::Created { id }) => format!(
+            )),
+            Ok(tools::LinkResult::Created { id }) => Ok(format!(
                 "Linked {} -> card {} ({}). Relation ID: {}",
                 issue_ident, card_id, relation, id
-            ),
-            Err(e) => e,
+            )),
+            Err(e) => Err(e),
         }
     }
 
@@ -746,15 +689,10 @@ impl HulyMcpServer {
         name = "huly_create_project",
         description = "Create a tracker project from a local README.md (first '# heading' becomes name; first non-empty line after becomes description). Note: this creates a TRACKER PROJECT inside an existing Huly workspace, NOT a new workspace (upstream tool was misleadingly named 'create_workspace')."
     )]
-    async fn create_project(&self, Parameters(params): Parameters<CreateProjectParams>) -> String {
-        let proxy_url = match self.resolve_optional_workspace(params.workspace.as_deref()).await {
-            Ok(u) => u,
-            Err(e) => return e,
-        };
-        let content = match std::fs::read_to_string(&params.readme_path) {
-            Ok(c) => c,
-            Err(e) => return format!("Error reading README at '{}': {}", params.readme_path, e),
-        };
+    async fn create_project(&self, Parameters(params): Parameters<CreateProjectParams>) -> Result<String, String> {
+        let proxy_url = self.resolve_optional_workspace(params.workspace.as_deref()).await?;
+        let content = std::fs::read_to_string(&params.readme_path)
+            .map_err(|e| format!("reading README at '{}': {}", params.readme_path, e))?;
         let (name, description) = tools::parse_readme(&content);
         let identifier = params
             .identifier
@@ -766,8 +704,8 @@ impl HulyMcpServer {
                 "identifier": identifier,
                 "description": description,
             }))
-            .unwrap_or_else(|e| format!("Error: {e}")),
-            Err(e) => e,
+            .map_err(|e| format!("{e}")),
+            Err(e) => Err(e),
         }
     }
 
@@ -775,17 +713,17 @@ impl HulyMcpServer {
         name = "huly_sync_status",
         description = "Compare local docs/ files against the last sync state. Reports new files, modified files, deleted files. Reads sync state from .huly-sync-state.json in the configured working directory."
     )]
-    async fn sync_status(&self, _params: Parameters<SyncStatusParams>) -> String {
+    async fn sync_status(&self, _params: Parameters<SyncStatusParams>) -> Result<String, String> {
         let Some(runner) = self.sync_runner.as_ref() else {
-            return SyncRunner::not_configured_error();
+            return Err(SyncRunner::not_configured_error());
         };
         match runner.status().await {
             Ok(report) => serde_json::to_string_pretty(&report)
-                .unwrap_or_else(|e| format!("Error serialising status: {e}")),
-            Err(crate::sync::SyncError::ParseStatus { raw, source }) => format!(
+                .map_err(|e| format!("serialising status: {e}")),
+            Err(crate::sync::SyncError::ParseStatus { raw, source }) => Ok(format!(
                 "warning: status output was not valid JSON ({source}). Raw output:\n{raw}"
-            ),
-            Err(e) => format!("Sync status failed: {e}"),
+            )),
+            Err(e) => Err(format!("Sync status failed: {e}")),
         }
     }
 
@@ -793,9 +731,9 @@ impl HulyMcpServer {
         name = "huly_sync_cards",
         description = "Run the card sync pipeline: Enums -> MasterTags -> Associations -> Cards -> Binaries -> Relations. Pushes local YAML/Markdown specs to Huly. Set dry_run=true to preview without changes."
     )]
-    async fn sync_cards(&self, Parameters(params): Parameters<SyncCardsParams>) -> String {
+    async fn sync_cards(&self, Parameters(params): Parameters<SyncCardsParams>) -> Result<String, String> {
         let Some(runner) = self.sync_runner.as_ref() else {
-            return SyncRunner::not_configured_error();
+            return Err(SyncRunner::not_configured_error());
         };
         match runner.sync(params.dry_run).await {
             Ok(out) => {
@@ -809,12 +747,12 @@ impl HulyMcpServer {
                     text.push_str("\n--- stderr ---\n");
                     text.push_str(out.stderr.trim());
                 }
-                text
+                Ok(text)
             }
             Err(crate::sync::SyncError::NonZeroExit { code, stderr_tail }) => {
-                format!("Sync failed (exit {code}):\n{stderr_tail}")
+                Err(format!("Sync failed (exit {code}):\n{stderr_tail}"))
             }
-            Err(e) => format!("Sync failed: {e}"),
+            Err(e) => Err(format!("Sync failed: {e}")),
         }
     }
 }
@@ -934,10 +872,11 @@ mod tests {
     async fn list_workspaces_empty_returns_message() {
         let registry = BridgeRegistry::new();
         let server = make_server(registry);
-        let result = server
+        let err = server
             .list_workspaces(Parameters(ListWorkspacesParams {}))
-            .await;
-        assert!(result.contains("No workspaces discovered"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("No workspaces discovered"));
     }
 
     #[tokio::test]
@@ -949,7 +888,8 @@ mod tests {
         let server = make_server(registry);
         let result = server
             .list_workspaces(Parameters(ListWorkspacesParams {}))
-            .await;
+            .await
+            .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(parsed.is_array());
         assert_eq!(parsed.as_array().unwrap().len(), 1);
@@ -975,7 +915,8 @@ mod tests {
                 query: serde_json::json!({}),
                 limit: None,
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("d1"));
         assert!(result.contains("total"));
     }
@@ -983,15 +924,16 @@ mod tests {
     #[tokio::test]
     async fn find_tool_unknown_workspace_returns_error() {
         let server = make_server(BridgeRegistry::new());
-        let result = server
+        let err = server
             .find(Parameters(FindParams {
                 workspace: "missing".into(),
                 class: "cls".into(),
                 query: serde_json::json!({}),
                 limit: None,
             }))
-            .await;
-        assert!(result.contains("not found"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("not found"));
     }
 
     #[tokio::test]
@@ -1013,7 +955,8 @@ mod tests {
                 class: "cls".into(),
                 query: serde_json::json!({"_id": "d1"}),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("d1"));
     }
 
@@ -1033,7 +976,8 @@ mod tests {
                 class: "cls".into(),
                 query: serde_json::json!({}),
             }))
-            .await;
+            .await
+            .unwrap();
         assert_eq!(result, "null");
     }
 
@@ -1056,7 +1000,8 @@ mod tests {
                 space: "sp".into(),
                 attributes: serde_json::json!({"title": "test"}),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("new-123"));
     }
 
@@ -1081,7 +1026,8 @@ mod tests {
                 id: "d1".into(),
                 operations: serde_json::json!({"title": "updated"}),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("success"));
         assert!(result.contains("true"));
     }
@@ -1106,7 +1052,8 @@ mod tests {
                 space: "sp".into(),
                 id: "d1".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("success"));
     }
 
@@ -1120,15 +1067,16 @@ mod tests {
             .await;
 
         let server = make_server_with_mock(&mock).await;
-        let result = server
+        let err = server
             .find(Parameters(FindParams {
                 workspace: "ws1".into(),
                 class: "cls".into(),
                 query: serde_json::json!({}),
                 limit: None,
             }))
-            .await;
-        assert!(result.contains("Error"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("500") || err.contains("internal error"));
     }
 
     #[test]
@@ -1203,7 +1151,7 @@ mod tests {
         mount_default_find_empty(&mock).await;
 
         let server = make_server_with_mock(&mock).await;
-        let result = server.discover(Parameters(DiscoverParams { workspace: None })).await;
+        let result = server.discover(Parameters(DiscoverParams { workspace: None })).await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["projects"].as_array().unwrap().len(), 1);
         assert_eq!(v["issueSummary"]["total"], 3);
@@ -1214,8 +1162,8 @@ mod tests {
     #[tokio::test]
     async fn discover_errors_when_no_workspace() {
         let server = make_server(BridgeRegistry::new());
-        let result = server.discover(Parameters(DiscoverParams { workspace: None })).await;
-        assert!(result.contains("No workspaces"));
+        let err = server.discover(Parameters(DiscoverParams { workspace: None })).await.unwrap_err();
+        assert!(err.contains("No workspaces"));
     }
 
     #[tokio::test]
@@ -1242,7 +1190,8 @@ mod tests {
                 query: Some("invoice".into()),
                 limit: 50,
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.starts_with("Found 1 cards:"));
         assert!(result.contains("Apple invoice"));
         assert!(!result.contains("Zebra"));
@@ -1269,7 +1218,8 @@ mod tests {
                 workspace: None, project: None, component: None,
                 status: None, query: None, limit: 50,
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.starts_with("Found 2 issues:"));
         // Order: number 1 ("A") before number 2 ("B").
         let pos_a = result.find("\"title\": \"A\"").unwrap();
@@ -1287,7 +1237,8 @@ mod tests {
                 workspace: None,
                 identifier: "MUH-99".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         assert_eq!(result, "Issue MUH-99 not found.");
     }
 
@@ -1325,7 +1276,8 @@ mod tests {
                 workspace: None,
                 identifier: "MUH-1".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         let rels = v["linkedRelations"].as_array().unwrap();
         assert_eq!(rels.len(), 1);
@@ -1384,7 +1336,8 @@ mod tests {
                 title: "New work".into(), description: "details".into(),
                 component: None, status: IssueStatus::Todo, priority: 3,
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("Created issue MUH-11"), "got: {result}");
         assert!(result.contains("New work"));
     }
@@ -1436,7 +1389,8 @@ mod tests {
                 title: "Retried work".into(), description: "desc".into(),
                 component: None, status: IssueStatus::Todo, priority: 3,
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("Created issue MUH-6"), "got: {result}");
     }
 
@@ -1489,7 +1443,8 @@ mod tests {
                 title: Some("renamed".into()), description: None,
                 status: Some(IssueStatus::InProgress), priority: None, component: None,
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("Updated MUH-1"));
         assert!(result.contains("title"));
         assert!(result.contains("status"));
@@ -1534,7 +1489,8 @@ mod tests {
                 workspace: None, project: None,
                 label: "Auth".into(), description: "".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("already exists"));
         assert!(result.contains("comp-1"));
     }
@@ -1570,7 +1526,8 @@ mod tests {
                 workspace: None, project: None,
                 label: "Frontend".into(), description: "ui".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.starts_with("Created component"));
         assert!(result.contains("Frontend"));
     }
@@ -1608,7 +1565,8 @@ mod tests {
                 card_id: "card-7".into(),
                 relation: "module".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("Linked MUH-3 -> card card-7 (module)"));
     }
 
@@ -1649,7 +1607,8 @@ mod tests {
                 card_id: "card-7".into(),
                 relation: "flow".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("already exists"));
         assert!(result.contains("rel-existing"));
     }
@@ -1681,7 +1640,8 @@ mod tests {
                 object_attr: "description".into(),
                 markdown: "# Heading".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["ref"], "blob-xyz");
     }
@@ -1696,7 +1656,7 @@ mod tests {
             .await;
 
         let server = make_server_with_mock(&mock).await;
-        let result = server
+        let err = server
             .upload_markup(Parameters(UploadMarkupParams {
                 workspace: None,
                 object_class: "c".into(),
@@ -1704,15 +1664,15 @@ mod tests {
                 object_attr: "description".into(),
                 markdown: "x".into(),
             }))
-            .await;
-        assert!(result.starts_with("Error:"), "got: {result}");
-        assert!(result.contains("503"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("503"), "got: {err}");
     }
 
     #[tokio::test]
     async fn upload_markup_tool_errors_when_no_workspace() {
         let server = make_server(BridgeRegistry::new());
-        let result = server
+        let err = server
             .upload_markup(Parameters(UploadMarkupParams {
                 workspace: None,
                 object_class: "c".into(),
@@ -1720,8 +1680,9 @@ mod tests {
                 object_attr: "description".into(),
                 markdown: "x".into(),
             }))
-            .await;
-        assert!(result.contains("No workspaces"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("No workspaces"));
     }
 
     #[tokio::test]
@@ -1755,7 +1716,8 @@ mod tests {
                 source_ref: Some("blob-abc".into()),
                 format: "markdown".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["content"], "# Heading");
         assert_eq!(v["format"], "markdown");
@@ -1786,7 +1748,8 @@ mod tests {
                 source_ref: None,
                 format: "prosemirror".into(),
             }))
-            .await;
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["format"], "prosemirror");
         assert!(v["content"].as_str().unwrap().contains("\"type\":\"doc\""));
@@ -1802,7 +1765,7 @@ mod tests {
             .await;
 
         let server = make_server_with_mock(&mock).await;
-        let result = server
+        let err = server
             .fetch_markup(Parameters(FetchMarkupParams {
                 workspace: None,
                 object_class: "c".into(),
@@ -1811,9 +1774,9 @@ mod tests {
                 source_ref: None,
                 format: "markdown".into(),
             }))
-            .await;
-        assert!(result.starts_with("Error:"));
-        assert!(result.contains("503"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("503"));
     }
 
     #[tokio::test]
@@ -1835,7 +1798,8 @@ mod tests {
                 readme_path,
                 identifier: None,
             }))
-            .await;
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["id"], "proj-new");
         assert_eq!(v["name"], "Phase Five MCP");
@@ -1868,18 +1832,19 @@ mod tests {
     #[tokio::test]
     async fn sync_status_unconfigured_returns_helpful_error() {
         let server = make_server(BridgeRegistry::new());
-        let result = server.sync_status(Parameters(SyncStatusParams {})).await;
-        assert!(result.contains("script_path"));
-        assert!(result.contains("[mcp.sync]"));
+        let err = server.sync_status(Parameters(SyncStatusParams {})).await.unwrap_err();
+        assert!(err.contains("script_path"));
+        assert!(err.contains("[mcp.sync]"));
     }
 
     #[tokio::test]
     async fn sync_cards_unconfigured_returns_helpful_error() {
         let server = make_server(BridgeRegistry::new());
-        let result = server
+        let err = server
             .sync_cards(Parameters(SyncCardsParams { dry_run: false }))
-            .await;
-        assert!(result.contains("script_path"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("script_path"));
     }
 
     #[tokio::test]
@@ -1887,7 +1852,7 @@ mod tests {
         let workdir = std::env::temp_dir().join(format!("huly-srv-status-{}", std::process::id()));
         std::fs::create_dir_all(&workdir).unwrap();
         let server = server_with_sync(fixture_path("fake_sync_status.sh"), workdir);
-        let result = server.sync_status(Parameters(SyncStatusParams {})).await;
+        let result = server.sync_status(Parameters(SyncStatusParams {})).await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["summary"], "2 changes detected.");
         assert_eq!(v["totalTracked"], 5);
@@ -1900,7 +1865,8 @@ mod tests {
         let server = server_with_sync(fixture_path("fake_sync_ok.sh"), workdir);
         let result = server
             .sync_cards(Parameters(SyncCardsParams { dry_run: true }))
-            .await;
+            .await
+            .unwrap();
         assert!(result.contains("Sync (DRY RUN) complete"));
         assert!(result.contains("DRY RUN"));
         // The "no document found" upstream noise must be filtered out.
@@ -1912,12 +1878,13 @@ mod tests {
         let workdir = std::env::temp_dir().join(format!("huly-srv-fail-{}", std::process::id()));
         std::fs::create_dir_all(&workdir).unwrap();
         let server = server_with_sync(fixture_path("fake_sync_fail.sh"), workdir);
-        let result = server
+        let err = server
             .sync_cards(Parameters(SyncCardsParams { dry_run: false }))
-            .await;
-        assert!(result.contains("Sync failed"));
-        assert!(result.contains("exit 7"));
-        assert!(result.contains("connection refused"));
+            .await
+            .unwrap_err();
+        assert!(err.contains("Sync failed"));
+        assert!(err.contains("exit 7"));
+        assert!(err.contains("connection refused"));
     }
 
     fn tempdir_simple() -> String {

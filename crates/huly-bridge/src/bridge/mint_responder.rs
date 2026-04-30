@@ -75,6 +75,11 @@ pub struct MintBrokerConfig {
     /// REST base URL announced to MCP. Bridges typically derive this from
     /// `[huly].url + "/api/v1"` once at startup.
     pub rest_base_url: String,
+    /// Accounts-service base URL announced to MCP — sourced from
+    /// `[huly] accounts_url` so MCP doesn't have to guess. `None` means
+    /// the operator did not configure one; downstream tools that need it
+    /// (`huly_list_workspaces`) surface the gap clearly.
+    pub accounts_url: Option<String>,
     /// Workspace slug → resolved credential.
     pub credentials: Arc<HashMap<String, ResolvedCredential>>,
 }
@@ -104,6 +109,7 @@ impl MintBrokerConfig {
     /// otherwise).
     pub fn from_credentials(
         rest_base_url: String,
+        accounts_url: Option<String>,
         creds: &[WorkspaceCredential],
     ) -> anyhow::Result<Self> {
         let mut map = HashMap::with_capacity(creds.len());
@@ -128,6 +134,7 @@ impl MintBrokerConfig {
         }
         Ok(Self {
             rest_base_url,
+            accounts_url,
             credentials: Arc::new(map),
         })
     }
@@ -228,6 +235,7 @@ pub async fn handle_mint(
         transactor_url: info.endpoint,
         rest_base_url: cfg.rest_base_url.clone(),
         workspace_uuid,
+        accounts_url: cfg.accounts_url.clone(),
     })
 }
 
@@ -393,8 +401,19 @@ mod tests {
         );
         MintBrokerConfig {
             rest_base_url: "https://huly.example/api/v1".into(),
+            accounts_url: None,
             credentials: Arc::new(map),
         }
+    }
+
+    fn cfg_with_accounts(
+        workspace: &str,
+        auth: ResolvedAuth,
+        accounts_url: &str,
+    ) -> MintBrokerConfig {
+        let mut c = cfg_with(workspace, auth);
+        c.accounts_url = Some(accounts_url.to_string());
+        c
     }
 
     fn req_for(workspace: &str) -> MintRequest {
@@ -533,7 +552,49 @@ mod tests {
             token: Some(secrecy::SecretString::from("t")),
             jwt_ttl_secs: None,
         }];
-        let err = MintBrokerConfig::from_credentials("https://x".into(), &creds).unwrap_err();
+        let err =
+            MintBrokerConfig::from_credentials("https://x".into(), None, &creds).unwrap_err();
         assert!(err.to_string().contains("exactly one"));
+    }
+
+    #[tokio::test]
+    async fn happy_path_propagates_configured_accounts_url() {
+        let cfg = cfg_with_accounts(
+            "ws",
+            ResolvedAuth::Token("t".into()),
+            "https://huly.example/_accounts",
+        );
+        let stub = StubAccounts::default().with_select(Ok(WorkspaceLoginInfo {
+            endpoint: "wss://h/_t".into(),
+            token: "ws-jwt".into(),
+            workspace: "uuid-x".into(),
+            social_id: None,
+        }));
+        let reply = handle_mint(&cfg, &stub, &req_for("ws")).await;
+        match reply {
+            MintReply::Ok(r) => {
+                assert_eq!(
+                    r.accounts_url.as_deref(),
+                    Some("https://huly.example/_accounts")
+                );
+            }
+            MintReply::Err { error } => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn happy_path_omits_accounts_url_when_unconfigured() {
+        let cfg = cfg_with("ws", ResolvedAuth::Token("t".into()));
+        let stub = StubAccounts::default().with_select(Ok(WorkspaceLoginInfo {
+            endpoint: "wss://h/_t".into(),
+            token: "ws-jwt".into(),
+            workspace: "uuid-x".into(),
+            social_id: None,
+        }));
+        let reply = handle_mint(&cfg, &stub, &req_for("ws")).await;
+        match reply {
+            MintReply::Ok(r) => assert!(r.accounts_url.is_none()),
+            MintReply::Err { error } => panic!("unexpected error: {error:?}"),
+        }
     }
 }

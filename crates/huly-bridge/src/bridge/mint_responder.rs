@@ -80,6 +80,11 @@ pub struct MintBrokerConfig {
     /// the operator did not configure one; downstream tools that need it
     /// (`huly_list_workspaces`) surface the gap clearly.
     pub accounts_url: Option<String>,
+    /// Collaborator-service base URL (e.g. from `/config.json
+    /// COLLABORATOR_URL`). Bridges that couldn't fetch it pass `None`;
+    /// MCP markup tools then surface "not configured" rather than
+    /// guessing. Optional for backward compatibility.
+    pub collaborator_url: Option<String>,
     /// Workspace slug → resolved credential.
     pub credentials: Arc<HashMap<String, ResolvedCredential>>,
 }
@@ -110,6 +115,7 @@ impl MintBrokerConfig {
     pub fn from_credentials(
         rest_base_url: String,
         accounts_url: Option<String>,
+        collaborator_url: Option<String>,
         creds: &[WorkspaceCredential],
     ) -> anyhow::Result<Self> {
         let mut map = HashMap::with_capacity(creds.len());
@@ -135,6 +141,7 @@ impl MintBrokerConfig {
         Ok(Self {
             rest_base_url,
             accounts_url,
+            collaborator_url,
             credentials: Arc::new(map),
         })
     }
@@ -236,6 +243,7 @@ pub async fn handle_mint(
         rest_base_url: cfg.rest_base_url.clone(),
         workspace_uuid,
         accounts_url: cfg.accounts_url.clone(),
+        collaborator_url: cfg.collaborator_url.clone(),
     })
 }
 
@@ -402,6 +410,7 @@ mod tests {
         MintBrokerConfig {
             rest_base_url: "https://huly.example/api/v1".into(),
             accounts_url: None,
+            collaborator_url: None,
             credentials: Arc::new(map),
         }
     }
@@ -553,7 +562,8 @@ mod tests {
             jwt_ttl_secs: None,
         }];
         let err =
-            MintBrokerConfig::from_credentials("https://x".into(), None, &creds).unwrap_err();
+            MintBrokerConfig::from_credentials("https://x".into(), None, None, &creds)
+                .unwrap_err();
         assert!(err.to_string().contains("exactly one"));
     }
 

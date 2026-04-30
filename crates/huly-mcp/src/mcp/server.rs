@@ -208,6 +208,28 @@ pub struct DiscoverParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct UploadMarkupParams {
+    pub workspace: String,
+    pub object_class: String,
+    pub object_id: String,
+    pub object_attr: String,
+    /// Plain markdown text. Converted to ProseMirror JSON before upload.
+    pub markdown: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FetchMarkupParams {
+    pub workspace: String,
+    pub object_class: String,
+    pub object_id: String,
+    pub object_attr: String,
+    /// Optional `source` parameter — pass when retrieving a specific
+    /// historical revision.
+    #[serde(default)]
+    pub source_ref: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SyncStatusParams {}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -256,6 +278,24 @@ impl HulyMcpServer {
             .for_workspace(workspace)
             .await
             .map_err(|e| format_factory_error(&e))
+    }
+
+    async fn collaborator_for(
+        &self,
+        workspace: &str,
+    ) -> Result<huly_client::collaborator::CollaboratorClient, String> {
+        let url = self
+            .factory
+            .collaborator_url(workspace)
+            .await
+            .map_err(|e| format_factory_error(&e))?
+            .ok_or_else(|| {
+                "bridge JWT broker did not advertise a collaborator_url for this workspace; \
+                 the markup tools are unavailable until the bridge can resolve \
+                 COLLABORATOR_URL via /config.json."
+                    .to_string()
+            })?;
+        Ok(huly_client::collaborator::CollaboratorClient::new(&url))
     }
 }
 
@@ -702,6 +742,64 @@ impl HulyMcpServer {
         let client = self.client_for(&params.workspace).await?;
         let v = tools::discover(&*client).await?;
         serde_json::to_string_pretty(&v).map_err(|e| format!("{e}"))
+    }
+
+    /// Upload markdown as a ProseMirror markup blob and return the resulting
+    /// MarkupBlobRef. Stamp the ref into the corresponding doc field via
+    /// `huly_update` / `huly_update_issue`.
+    #[tool(
+        name = "huly_upload_markup",
+        description = "Upload markdown as a ProseMirror markup blob; returns the MarkupBlobRef."
+    )]
+    async fn upload_markup_tool(
+        &self,
+        Parameters(params): Parameters<UploadMarkupParams>,
+    ) -> Result<String, String> {
+        let collaborator = self.collaborator_for(&params.workspace).await?;
+        let (workspace_uuid, jwt) = self
+            .factory
+            .collaborator_auth(&params.workspace)
+            .await
+            .map_err(|e| format_factory_error(&e))?;
+        let blob_ref = tools::upload_markup(
+            &collaborator,
+            &jwt,
+            &workspace_uuid,
+            &params.object_class,
+            &params.object_id,
+            &params.object_attr,
+            &params.markdown,
+        )
+        .await?;
+        Ok(serde_json::json!({"ref": blob_ref}).to_string())
+    }
+
+    /// Fetch a markup blob and return it as markdown.
+    #[tool(
+        name = "huly_fetch_markup",
+        description = "Fetch a markup blob and return it as markdown."
+    )]
+    async fn fetch_markup_tool(
+        &self,
+        Parameters(params): Parameters<FetchMarkupParams>,
+    ) -> Result<String, String> {
+        let collaborator = self.collaborator_for(&params.workspace).await?;
+        let (workspace_uuid, jwt) = self
+            .factory
+            .collaborator_auth(&params.workspace)
+            .await
+            .map_err(|e| format_factory_error(&e))?;
+        let md = tools::fetch_markup(
+            &collaborator,
+            &jwt,
+            &workspace_uuid,
+            &params.object_class,
+            &params.object_id,
+            &params.object_attr,
+            params.source_ref.as_deref(),
+        )
+        .await?;
+        Ok(serde_json::json!({"markdown": md}).to_string())
     }
 
     #[tool(

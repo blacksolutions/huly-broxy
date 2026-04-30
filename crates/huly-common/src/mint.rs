@@ -97,6 +97,13 @@ pub struct MintResponse {
     /// callers that need it must surface the gap rather than guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounts_url: Option<String>,
+
+    /// Collaborator-service base URL (markup blob storage), discovered by
+    /// the bridge from `/config.json`. Required by `huly_upload_markup` /
+    /// `huly_fetch_markup`. `None` = the bridge couldn't resolve one;
+    /// markup tools surface a clear "not configured" error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaborator_url: Option<String>,
 }
 
 /// Structured error reply. Wire shape is `{"error": {"code": ..., "message": ...}}`
@@ -154,6 +161,7 @@ mod tests {
             rest_base_url: "https://h.example/api/v1".into(),
             workspace_uuid: "uuid-1".into(),
             accounts_url: Some("https://h.example/api/v1/accounts".into()),
+            collaborator_url: Some("https://collab.example".into()),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let back: MintResponse = serde_json::from_str(&json).unwrap();
@@ -171,6 +179,7 @@ mod tests {
             rest_base_url: "https://h/api/v1".into(),
             workspace_uuid: "uuid-2".into(),
             accounts_url: None,
+            collaborator_url: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         // Field is skipped when None, but deserialize defaults it back.

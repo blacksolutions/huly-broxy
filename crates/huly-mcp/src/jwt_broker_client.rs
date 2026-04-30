@@ -139,6 +139,7 @@ mod tests {
                 rest_base_url: "https://r".into(),
                 workspace_uuid: "uuid".into(),
                 accounts_url: None,
+                collaborator_url: None,
             });
             broker
                 .publish(reply_to, serde_json::to_vec(&reply).unwrap().into())
@@ -219,6 +220,7 @@ mod tests {
             rest_base_url: "https://r".into(),
             workspace_uuid: "uuid-x".into(),
             accounts_url: Some("https://r/accounts".into()),
+            collaborator_url: Some("https://collab".into()),
         };
         let bytes = serde_json::to_vec(&MintReply::Ok(resp.clone())).unwrap();
         match decode_reply(&bytes).unwrap() {

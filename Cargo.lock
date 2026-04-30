@@ -1023,6 +1023,7 @@ dependencies = [
  "futures",
  "huly-client",
  "huly-common",
+ "mockall",
  "reqwest",
  "rmcp",
  "schemars",

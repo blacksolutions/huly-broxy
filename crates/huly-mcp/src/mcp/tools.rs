@@ -23,9 +23,12 @@ use crate::txcud::{
     SYSTEM_ACCOUNT, gen_tx_id, tx_collection_create, tx_create_doc, tx_update_doc,
 };
 use huly_client::client::PlatformClient;
+use huly_client::collaborator::{CollaboratorClient, CollaboratorError};
+use huly_client::markdown::{markdown_to_prosemirror_json, prosemirror_to_markdown};
 use huly_client::schema_resolver::SchemaHandle;
 use huly_common::api::ApplyIfMatch;
 use huly_common::types::{Doc, FindOptions};
+use secrecy::SecretString;
 use serde_json::{Value, json};
 
 /// Resolve a Tracker project by user input (`_id` OR `identifier` like "MUH").
@@ -842,6 +845,63 @@ pub fn derive_identifier(name: &str) -> String {
     letters.into_iter().collect()
 }
 
+/// Upload `markdown_text` as a ProseMirror markup blob for
+/// `(object_class, object_id, object_attr)` and return the resulting
+/// `MarkupBlobRef` string, suitable for stamping into the doc's
+/// description / text field via `update_doc` / `update_collection`.
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_markup(
+    collaborator: &CollaboratorClient,
+    token: &SecretString,
+    workspace_uuid: &str,
+    object_class: &str,
+    object_id: &str,
+    object_attr: &str,
+    markdown_text: &str,
+) -> Result<String, String> {
+    let pm_json = markdown_to_prosemirror_json(markdown_text);
+    collaborator
+        .create_markup(
+            token,
+            workspace_uuid,
+            object_class,
+            object_id,
+            object_attr,
+            &pm_json,
+        )
+        .await
+        .map_err(format_collab_error)
+}
+
+/// Fetch a markup blob and return it as markdown.
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_markup(
+    collaborator: &CollaboratorClient,
+    token: &SecretString,
+    workspace_uuid: &str,
+    object_class: &str,
+    object_id: &str,
+    object_attr: &str,
+    source_ref: Option<&str>,
+) -> Result<String, String> {
+    let pm_json = collaborator
+        .get_markup(
+            token,
+            workspace_uuid,
+            object_class,
+            object_id,
+            object_attr,
+            source_ref,
+        )
+        .await
+        .map_err(format_collab_error)?;
+    Ok(prosemirror_to_markdown(&pm_json))
+}
+
+fn format_collab_error(e: CollaboratorError) -> String {
+    format!("collaborator error: {e}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1227,6 +1287,101 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_lowercase().contains("schema"), "msg: {err}");
+    }
+
+    #[tokio::test]
+    async fn upload_markup_round_trip_against_wiremock() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/rpc/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": { "description": "blob-ref-1" }
+            })))
+            .mount(&server)
+            .await;
+        let collab = CollaboratorClient::new(&server.uri());
+        let token = SecretString::from("jwt");
+        let r = upload_markup(
+            &collab,
+            &token,
+            "uuid-x",
+            "tracker:class:Issue",
+            "issue-1",
+            "description",
+            "# Hello",
+        )
+        .await
+        .unwrap();
+        assert_eq!(r, "blob-ref-1");
+    }
+
+    #[tokio::test]
+    async fn upload_markup_propagates_collaborator_error() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/rpc/.+"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("denied"))
+            .mount(&server)
+            .await;
+        let collab = CollaboratorClient::new(&server.uri());
+        let token = SecretString::from("jwt");
+        let err = upload_markup(
+            &collab,
+            &token,
+            "uuid-x",
+            "tracker:class:Issue",
+            "issue-1",
+            "description",
+            "x",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_lowercase().contains("collaborator"), "msg: {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_markup_returns_markdown_round_trip() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // ProseMirror JSON for "Hello world\n".
+        let pm = serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "Hello world" }]
+                }
+            ]
+        });
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/rpc/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": { "description": pm }
+            })))
+            .mount(&server)
+            .await;
+        let collab = CollaboratorClient::new(&server.uri());
+        let token = SecretString::from("jwt");
+        let md = fetch_markup(
+            &collab,
+            &token,
+            "uuid-x",
+            "tracker:class:Issue",
+            "issue-1",
+            "description",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(md.contains("Hello world"), "got: {md}");
     }
 
     #[tokio::test]

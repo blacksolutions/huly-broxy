@@ -71,6 +71,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let mint_creds = effective_workspace_credentials(&config);
     let mint_rest_base_url = format!("{}/api/v1", config.huly.url.trim_end_matches('/'));
     let mint_accounts_url = config.huly.accounts_url.clone();
+    let mint_collaborator_url = server_config_cache.collaborator_url();
     let subject_prefix = config
         .nats
         .subject_prefix
@@ -99,6 +100,7 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let mint_cfg = MintBrokerConfig::from_credentials(
         mint_rest_base_url,
         mint_accounts_url,
+        mint_collaborator_url,
         &mint_creds,
     )
     .map_err(|e| anyhow::anyhow!("mint broker config: {e}"))?;

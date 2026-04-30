@@ -40,6 +40,13 @@ struct WorkspaceEntry {
     /// bridge did not advertise one — callers that need it must surface
     /// the gap.
     accounts_url: Option<String>,
+    /// Collaborator-service base URL minted alongside the JWT.
+    collaborator_url: Option<String>,
+    /// Workspace UUID echoed back by the broker — required by the
+    /// collaborator client URL key.
+    workspace_uuid: String,
+    /// Workspace JWT (used as collaborator bearer token).
+    workspace_jwt: secrecy::SecretString,
     /// Schema cache, lazily populated on first access.
     schema: SchemaHandle,
     /// When the schema was last refreshed (process clock; `None` = never).
@@ -117,6 +124,27 @@ impl HulyClientFactory {
         Ok(self.entry(workspace).await?.accounts_url)
     }
 
+    /// Collaborator-service base URL announced by the bridge alongside the
+    /// workspace JWT. `None` if the bridge couldn't resolve one — markup
+    /// tools must surface that clearly rather than guessing.
+    pub async fn collaborator_url(
+        &self,
+        workspace: &str,
+    ) -> Result<Option<String>, FactoryError> {
+        Ok(self.entry(workspace).await?.collaborator_url)
+    }
+
+    /// Per-workspace authentication context used by the markup tools.
+    /// Returns `(workspace_uuid, workspace_jwt)`. The JWT is held in a
+    /// [`secrecy::SecretString`] so it cannot leak through `Debug` printing.
+    pub async fn collaborator_auth(
+        &self,
+        workspace: &str,
+    ) -> Result<(String, secrecy::SecretString), FactoryError> {
+        let entry = self.entry(workspace).await?;
+        Ok((entry.workspace_uuid, entry.workspace_jwt))
+    }
+
     /// Get the resolved schema for `workspace`, refreshing if the cache is
     /// older than `schema_ttl` or if it's never been populated. On failure,
     /// returns the previous cached schema (possibly empty) — better stale
@@ -184,6 +212,9 @@ impl HulyClientFactory {
             refresh_at_ms: resp.refresh_at_ms,
             account_service_jwt: resp.account_service_jwt,
             accounts_url: resp.accounts_url,
+            collaborator_url: resp.collaborator_url,
+            workspace_uuid: resp.workspace_uuid,
+            workspace_jwt: secrecy::SecretString::from(resp.jwt),
             schema: SchemaHandle::new(),
             schema_refreshed_at: None,
         };
@@ -270,6 +301,7 @@ mod tests {
                 rest_base_url: "https://r.example".into(),
                 workspace_uuid: "uuid-1".into(),
                 accounts_url: Some("https://r.example/_accounts".into()),
+                collaborator_url: Some("https://collab.example".into()),
             };
             broker
                 .publish(reply_to, serde_json::to_vec(&MintReply::Ok(resp)).unwrap().into())
@@ -307,6 +339,9 @@ mod tests {
             refresh_at_ms: now_ms() + 60_000,
             account_service_jwt: None,
             accounts_url: None,
+            collaborator_url: None,
+            workspace_uuid: "u".into(),
+            workspace_jwt: secrecy::SecretString::from("t"),
             schema: SchemaHandle::new(),
             schema_refreshed_at: Some(Instant::now()),
         };
@@ -332,12 +367,19 @@ mod tests {
             refresh_at_ms: now_ms() + 60_000,
             account_service_jwt: Some("acct".into()),
             accounts_url: Some("https://h.example/_accounts".into()),
+            collaborator_url: Some("https://collab.example".into()),
+            workspace_uuid: "uuid-x".into(),
+            workspace_jwt: secrecy::SecretString::from("jwt"),
             schema: SchemaHandle::new(),
             schema_refreshed_at: None,
         };
         factory.inner.write().await.insert("ws".into(), entry);
         let url = factory.accounts_url("ws").await.unwrap();
         assert_eq!(url.as_deref(), Some("https://h.example/_accounts"));
+        let collab = factory.collaborator_url("ws").await.unwrap();
+        assert_eq!(collab.as_deref(), Some("https://collab.example"));
+        let (ws_uuid, _jwt) = factory.collaborator_auth("ws").await.unwrap();
+        assert_eq!(ws_uuid, "uuid-x");
     }
 
     #[tokio::test]
@@ -351,6 +393,9 @@ mod tests {
             refresh_at_ms: now_ms() + 60_000,
             account_service_jwt: None,
             accounts_url: None,
+            collaborator_url: None,
+            workspace_uuid: "u".into(),
+            workspace_jwt: secrecy::SecretString::from("t"),
             schema: SchemaHandle::new(),
             schema_refreshed_at: None,
         };

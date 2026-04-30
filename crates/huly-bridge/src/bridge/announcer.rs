@@ -1,5 +1,5 @@
 use crate::admin::health::HealthState;
-use crate::bridge::schema_resolver::SchemaHandle;
+use huly_client::schema_resolver::SchemaHandle;
 use huly_common::announcement::{
     ANNOUNCE_INTERVAL_SECS, ANNOUNCE_SUBJECT, BridgeAnnouncement, LOOKUP_SUBJECT,
     WorkspaceSchemaResponse, schema_fetch_subject,

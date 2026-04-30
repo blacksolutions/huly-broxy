@@ -43,7 +43,7 @@ pub async fn ephemeral_port() -> u16 {
 }
 
 /// Encode `value` as msgpack (named fields) then snappy-compress. Mirrors the
-/// `huly_bridge::huly::rpc::serialize` pipeline for binary+compression mode.
+/// `huly_client::rpc::serialize` pipeline for binary+compression mode.
 /// Duplicated here because the crate is binary-only and has no library target
 /// to import from; future phases can refactor into a shared lib if needed.
 pub fn encode_msgpack_snappy<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {

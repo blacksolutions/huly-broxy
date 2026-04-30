@@ -43,14 +43,10 @@ pub struct HulyConfig {
     pub tls_ca_cert: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "method")]
-pub enum AuthConfig {
-    #[serde(rename = "token")]
-    Token { token: SecretString },
-    #[serde(rename = "password")]
-    Password { email: String, password: SecretString },
-}
+// `AuthConfig` was hoisted into `huly-client` so the auth helpers can live
+// alongside the rest of the transactor protocol code. Re-exported here so
+// existing call sites under `crate::config::AuthConfig` keep working.
+pub use huly_client::auth::AuthConfig;
 
 #[derive(Debug, Deserialize)]
 pub struct NatsConfig {
@@ -95,7 +91,7 @@ fn default_ping_interval() -> u64 {
 }
 
 fn default_max_pending_requests() -> usize {
-    crate::huly::connection::DEFAULT_MAX_PENDING_REQUESTS
+    huly_client::connection::DEFAULT_MAX_PENDING_REQUESTS
 }
 
 fn default_nats_url() -> String {

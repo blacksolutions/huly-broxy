@@ -14,7 +14,7 @@ use axum::http::{Request, StatusCode};
 use axum::routing::post;
 use http_body_util::BodyExt;
 use huly_bridge::admin::platform_api::{MarkupState, upload_markup, fetch_markup};
-use huly_bridge::huly::collaborator::CollaboratorClient;
+use huly_client::collaborator::CollaboratorClient;
 use huly_bridge::service::workspace_token::WorkspaceTokenCache;
 use secrecy::SecretString;
 use serde_json::json;

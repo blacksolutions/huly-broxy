@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use huly_bridge::admin::health::HealthState;
 use huly_bridge::bridge::announcer::{self, SocialIdHandle};
-use huly_bridge::bridge::schema_resolver::SchemaHandle;
+use huly_client::schema_resolver::SchemaHandle;
 use huly_common::announcement::{BridgeAnnouncement, LOOKUP_SUBJECT};
 use tokio_util::sync::CancellationToken;
 

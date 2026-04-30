@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/huly-common", "crates/huly-bridge", "crates/huly-mcp"]
+members = ["crates/huly-common", "crates/huly-client", "crates/huly-bridge", "crates/huly-mcp"]
 resolver = "2"
 
 [workspace.package]

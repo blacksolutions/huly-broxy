@@ -1,7 +1,7 @@
 use crate::admin::health::HealthState;
 use crate::admin::platform_api::{self, MarkupState, PlatformClientHandle, PlatformState};
-use crate::bridge::schema_resolver::SchemaHandle;
-use crate::huly::collaborator::CollaboratorClient;
+use huly_client::schema_resolver::SchemaHandle;
+use huly_client::collaborator::CollaboratorClient;
 use crate::service::workspace_token::WorkspaceTokenCache;
 use axum::{
     Router,

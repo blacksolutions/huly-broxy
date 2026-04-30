@@ -14,7 +14,7 @@
 //! "skipping: HULY_INTEGRATION_URL not set" and exits 0. This keeps the
 //! suite safe to run on any dev machine while still allowing CI to opt-in.
 
-use huly_bridge::huly::rest::{RestClient, SearchOptions};
+use huly_client::rest::{RestClient, SearchOptions};
 
 /// Env-var name carrying the upstream Huly base URL
 /// (e.g. `https://huly.example.com`). When unset, every test in this file

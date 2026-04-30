@@ -1,7 +1,7 @@
 use reqwest::Client;
 use tracing::{debug, error};
 
-pub use crate::bridge::rate_limit::RateLimitInfo;
+pub use crate::rate_limit::RateLimitInfo;
 
 pub struct RestProxy {
     client: Client,

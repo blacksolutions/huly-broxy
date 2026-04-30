@@ -1,6 +1,20 @@
-use crate::config::AuthConfig;
-use crate::huly::accounts::{AccountsClient, AccountsError};
-use secrecy::ExposeSecret;
+use crate::accounts::{AccountsClient, AccountsError};
+use secrecy::{ExposeSecret, SecretString};
+use serde::Deserialize;
+
+/// How the bridge authenticates with the Huly transactor.
+///
+/// Hoisted from the bridge's central config so this module's tests can
+/// construct it without pulling in the full bridge config tree. Bridge
+/// re-exports this from `crate::config` for back-compat.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "method")]
+pub enum AuthConfig {
+    #[serde(rename = "token")]
+    Token { token: SecretString },
+    #[serde(rename = "password")]
+    Password { email: String, password: SecretString },
+}
 
 /// Authenticate with Huly and return an account-scoped session token.
 ///
@@ -43,7 +57,6 @@ impl From<AccountsError> for AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuthConfig;
     use secrecy::SecretString;
     use serde_json::json;
     use wiremock::matchers::{body_json, method, path};

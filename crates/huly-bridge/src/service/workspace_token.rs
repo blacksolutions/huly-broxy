@@ -1,6 +1,6 @@
 //! Workspace-scoped token cache.
 //!
-//! Mirrors [`crate::huly::rest::ServerConfigCache`] — an `Arc<RwLock<Option<SecretString>>>`
+//! Mirrors [`huly_client::rest::ServerConfigCache`] — an `Arc<RwLock<Option<SecretString>>>`
 //! with `set` / `get` accessors. Cheap to clone (reference-counted).
 //!
 //! Populated inside the reconnect loop every time `selectWorkspace` resolves

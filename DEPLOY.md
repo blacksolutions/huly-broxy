@@ -309,8 +309,10 @@ Create `/etc/huly-mcp/mcp.toml`:
 url = "nats://127.0.0.1:4222"
 
 [mcp]
-stale_timeout_secs = 30
-bridge_api_token = "your-shared-secret"  # must match bridge admin.api_token
+# Required (P4 / D8): logged by the bridge JWT broker for audit + rate-limit
+# attribution. Failure to set fails startup with a clear error.
+agent_id = "claude-code-<host>-<n>"
+transport = "rest"  # the only implemented variant; see P1 spike
 
 [log]
 level = "info"
@@ -321,7 +323,8 @@ sudo chmod 0600 /etc/huly-mcp/mcp.toml
 sudo chown root:root /etc/huly-mcp/mcp.toml
 ```
 
-MCP config contains the bridge API token — lock it down with `0600`.
+Lock `mcp.toml` down with `0600` — `agent_id` is sensitive (it shows up in
+audit logs the bridge keeps for the JWT broker).
 
 ### 5.2 Claude Code integration
 
@@ -339,9 +342,11 @@ Add to your `.mcp.json` (project root or `~/.claude/.mcp.json`):
 ```
 
 The MCP server will:
-- Connect to NATS
-- Discover all running bridges via `huly.bridge.announce` subject
-- Expose 7 tools: `huly_list_workspaces`, `huly_status`, `huly_find`, `huly_get`, `huly_create`, `huly_update`, `huly_delete`
+- Connect to NATS.
+- Mint workspace JWTs on demand via `huly.bridge.mint` (P4 / D10).
+- Expose the basic tools: `huly_list_workspaces`, `huly_status`,
+  `huly_find`, `huly_get`, `huly_create`, `huly_update`, `huly_delete`.
+  (Tracker / markup / sync tools land in P5 against the new direct path.)
 
 ---
 

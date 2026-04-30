@@ -1,33 +1,61 @@
 # Ansible deploy
 
-Deploys `huly-bridge` to hosts in the `bridge` inventory group.
+Deploys `huly-bridge` to hosts in the `bridge` inventory group as one
+template-instance per workspace (`huly-bridge@<ws>.service`).
 
 ## What it does
-1. Verifies local release binary + vault config exist.
-2. Pushes config (vault-decrypted) to `/etc/huly-bridge/bridge.toml` (mode 0640).
-3. Installs systemd unit at `/etc/systemd/system/huly-bridge.service`.
-4. Installs binary at `/usr/local/bin/huly-bridge`.
-5. `daemon-reload`, restart on change, ensure enabled + started.
-6. Verifies `systemctl is-active` and prints recent journal lines.
 
-Idempotent — re-running with no changes triggers no restart.
+1. Verifies local release binary + per-workspace vault configs exist.
+2. Installs the systemd template unit at
+   `/etc/systemd/system/huly-bridge@.service`.
+3. Renders each workspace's vault-decrypted config to
+   `/etc/huly-bridge/workspaces.d/<ws>.toml` (mode 0640).
+4. Installs the binary at `/usr/local/bin/huly-bridge`.
+5. `daemon-reload` + `enable --now huly-bridge@<ws>` for each workspace
+   in `bridge_workspaces`.
+6. Disables and removes the legacy single-instance unit / config if
+   present (one-shot upgrade cleanup).
+7. Verifies `systemctl is-active huly-bridge@<ws>` and prints recent
+   journal lines per instance.
+
+Idempotent — re-running with no changes triggers no restart. A changed
+config restarts only that workspace's instance.
+
+## Vault layout
+
+One vault file per workspace:
+
+```
+ansible/files/workspaces/
+  muhasebot.toml          # vault-encrypted; safe to commit
+  beta.toml               # vault-encrypted
+  ...
+```
+
+Per-workspace files (rather than a single shared vault) so credentials
+rotate independently — re-encrypting one workspace does not touch the
+others, and a leak of one vault key compromises only one workspace's
+secrets.
 
 ## First-time setup
 
-1. Pick a vault password and write it to `ansible/.vault-pass` (gitignored), then export it for your shell:
+1. Pick a vault password and write it to `ansible/.vault-pass`
+   (gitignored), then export it:
    ```
    echo 'your-strong-password' > ansible/.vault-pass
    chmod 600 ansible/.vault-pass
    export ANSIBLE_VAULT_PASSWORD_FILE="$(pwd)/ansible/.vault-pass"
    ```
-   Add the `export` to your shell rc to persist. Alternatively pass `--vault-password-file ansible/.vault-pass` on each ansible command.
 
-2. Encrypt your bridge config into the playbook tree:
+2. Create + encrypt a config for each workspace listed in
+   `group_vars/bridge.yml :: bridge_workspaces`:
    ```
-   cp ../config/bridge.toml files/bridge.toml
-   ansible-vault encrypt files/bridge.toml
+   cp ../config/workspaces.d/muhasebot.toml.example \
+      files/workspaces/muhasebot.toml
+   $EDITOR files/workspaces/muhasebot.toml
+   ansible-vault encrypt files/workspaces/muhasebot.toml
    ```
-   The encrypted file is safe to commit.
+   Repeat for each workspace. Encrypted files are safe to commit.
 
 3. Confirm SSH reaches the host:
    ```
@@ -49,10 +77,18 @@ cd ansible && ansible-playbook deploy-bridge.yml --limit bridge --ask-become-pas
 
 | Action | Command |
 | --- | --- |
-| Edit config | `ansible-vault edit files/bridge.toml` |
-| View config | `ansible-vault view files/bridge.toml` |
-| Re-key | `ansible-vault rekey files/bridge.toml` |
-| Decrypt (don't commit!) | `ansible-vault decrypt files/bridge.toml` |
+| Edit one workspace | `ansible-vault edit files/workspaces/<ws>.toml` |
+| View one workspace | `ansible-vault view files/workspaces/<ws>.toml` |
+| Re-key one workspace | `ansible-vault rekey files/workspaces/<ws>.toml` |
+| Re-key all | `for f in files/workspaces/*.toml; do ansible-vault rekey "$f"; done` |
+
+## Adding a workspace
+
+1. Drop `<ws>.toml` (vault-encrypted) into `files/workspaces/`.
+2. Append `<ws>` to `bridge_workspaces` in `group_vars/bridge.yml` (or a
+   per-host override in `host_vars/<hostname>.yml`).
+3. Re-run `make deploy`. The playbook renders the config and enables
+   `huly-bridge@<ws>.service` without disturbing other instances.
 
 ## Adding a host
 
@@ -69,10 +105,12 @@ all:
           ansible_user: deploy
 ```
 
-## Per-host config overrides
-
-Drop YAML into `host_vars/<hostname>.yml` to override any var from `group_vars/bridge.yml`
-(e.g., a different `bridge_service` name for per-workspace bridges).
+Per-host workspace overrides go in `host_vars/<hostname>.yml`:
+```yaml
+bridge_workspaces:
+  - muhasebot
+  - tenant-a
+```
 
 ## Sudo
 

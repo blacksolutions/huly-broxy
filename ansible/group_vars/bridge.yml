@@ -1,10 +1,22 @@
 ---
 bridge_binary_local: "{{ playbook_dir }}/../target/x86_64-unknown-linux-gnu/release/huly-bridge"
-bridge_unit_local: "{{ playbook_dir }}/../systemd/huly-bridge.service"
-bridge_config_local: "{{ playbook_dir }}/files/bridge.toml"
+bridge_unit_local: "{{ playbook_dir }}/../systemd/huly-bridge@.service"
 
 bridge_install_path: /usr/local/bin/huly-bridge
-bridge_unit_path: /etc/systemd/system/huly-bridge.service
+bridge_unit_path: /etc/systemd/system/huly-bridge@.service
 bridge_config_dir: /etc/huly-bridge
-bridge_config_path: /etc/huly-bridge/bridge.toml
-bridge_service: huly-bridge
+bridge_workspaces_dir: /etc/huly-bridge/workspaces.d
+
+# Workspaces deployed to every host in the `bridge` group. Override per-host in
+# host_vars/<hostname>.yml. Each entry maps to:
+#   - source vault file:  ansible/files/workspaces/<ws>.toml  (vault-encrypted)
+#   - rendered config:    /etc/huly-bridge/workspaces.d/<ws>.toml
+#   - systemd instance:   huly-bridge@<ws>.service
+bridge_workspaces:
+  - muhasebot
+
+# Old single-instance unit name + path; deploy play disables and removes
+# these on the first run after upgrade.
+bridge_legacy_service: huly-bridge
+bridge_legacy_unit_path: /etc/systemd/system/huly-bridge.service
+bridge_legacy_config_path: /etc/huly-bridge/bridge.toml

@@ -1,0 +1,40 @@
+# Per-workspace ansible source config.
+#
+# Vault workflow:
+#   cp ../../config/workspaces.d/muhasebot.toml.example workspaces/muhasebot.toml
+#   $EDITOR workspaces/muhasebot.toml          # fill in real values
+#   ansible-vault encrypt workspaces/muhasebot.toml
+#
+# The encrypted file is safe to commit. To add another workspace, drop a new
+# `<ws>.toml` next to this file and add `<ws>` to bridge_workspaces in
+# group_vars/bridge.yml (or host_vars/<host>.yml).
+#
+# One vault file per workspace — credentials rotate independently and a
+# compromise of one workspace's secrets does not require re-encrypting the
+# others.
+
+[huly]
+url = "https://huly.example.com"
+workspace = "muhasebot"
+accounts_url = "https://huly.example.com/_accounts"
+use_binary_protocol = false
+use_compression = true
+
+[huly.auth]
+method = "password"
+email = "user@example.com"
+password = "REPLACE_ME"
+
+[nats]
+url = "nats://127.0.0.1:4222"
+subject_prefix = "huly"
+
+[admin]
+host = "0.0.0.0"
+port = 9095
+advertise_url = "http://10.0.0.5:9095"
+api_token = "change-me"
+
+[log]
+level = "info"
+json = false

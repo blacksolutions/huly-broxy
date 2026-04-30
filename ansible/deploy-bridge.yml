@@ -1,5 +1,5 @@
 ---
-- name: Deploy huly-bridge
+- name: Deploy huly-bridge (per-workspace template instances)
   hosts: bridge
   gather_facts: false
   become: true
@@ -17,17 +17,24 @@
         msg: "Binary not found at {{ bridge_binary_local }} — run `make linux` first."
       when: not local_bin.stat.exists
 
-    - name: Verify local config exists
+    - name: Verify each workspace has a vault config
       ansible.builtin.stat:
-        path: "{{ bridge_config_local }}"
+        path: "{{ playbook_dir }}/files/workspaces/{{ item }}.toml"
       delegate_to: localhost
       become: false
-      register: local_cfg
+      loop: "{{ bridge_workspaces }}"
+      register: local_ws_cfgs
 
-    - name: Fail if config missing
+    - name: Fail if any workspace vault config is missing
       ansible.builtin.fail:
-        msg: "Vault config not found at {{ bridge_config_local }} — see ansible/README.md."
-      when: not local_cfg.stat.exists
+        msg: >-
+          Missing vault config for workspace '{{ item.item }}' at
+          {{ playbook_dir }}/files/workspaces/{{ item.item }}.toml — see
+          ansible/README.md (per-workspace vault workflow).
+      loop: "{{ local_ws_cfgs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: not item.stat.exists
 
   tasks:
     - name: Ensure config dir exists
@@ -38,26 +45,22 @@
         group: root
         mode: "0755"
 
-    - name: Install bridge config (vault-decrypted)
-      ansible.builtin.copy:
-        src: "{{ bridge_config_local }}"
-        dest: "{{ bridge_config_path }}"
-        mode: "0644"
+    - name: Ensure workspaces.d dir exists
+      ansible.builtin.file:
+        path: "{{ bridge_workspaces_dir }}"
+        state: directory
         owner: root
         group: root
-      notify: Restart huly-bridge
-      no_log: true
+        mode: "0755"
 
-    - name: Install systemd unit
+    - name: Install systemd template unit
       ansible.builtin.copy:
         src: "{{ bridge_unit_local }}"
         dest: "{{ bridge_unit_path }}"
         mode: "0644"
         owner: root
         group: root
-      notify:
-        - Reload systemd
-        - Restart huly-bridge
+      notify: Reload systemd
 
     - name: Install huly-bridge binary
       ansible.builtin.copy:
@@ -66,44 +69,107 @@
         mode: "0755"
         owner: root
         group: root
-      notify: Restart huly-bridge
+      notify: Restart all bridge instances
 
-    - name: Flush handlers before enabling
+    - name: Render per-workspace configs (vault-decrypted)
+      ansible.builtin.copy:
+        src: "files/workspaces/{{ item }}.toml"
+        dest: "{{ bridge_workspaces_dir }}/{{ item }}.toml"
+        mode: "0640"
+        owner: root
+        group: root
+      loop: "{{ bridge_workspaces }}"
+      loop_control:
+        label: "{{ item }}"
+      no_log: true
+      notify: Restart changed bridge instance
+      register: rendered_configs
+
+    - name: Flush handlers before enabling instances
       ansible.builtin.meta: flush_handlers
 
-    - name: Enable and start huly-bridge
+    - name: Enable and start huly-bridge@<ws> for each workspace
       ansible.builtin.systemd:
-        name: "{{ bridge_service }}"
+        name: "huly-bridge@{{ item }}.service"
         enabled: true
         state: started
+        daemon_reload: true
+      loop: "{{ bridge_workspaces }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # ---- Legacy single-instance cleanup ------------------------------------
+    - name: Check for legacy single-instance unit
+      ansible.builtin.stat:
+        path: "{{ bridge_legacy_unit_path }}"
+      register: legacy_unit
+
+    - name: Disable legacy single-instance service if present
+      ansible.builtin.systemd:
+        name: "{{ bridge_legacy_service }}.service"
+        enabled: false
+        state: stopped
+      when: legacy_unit.stat.exists
+      failed_when: false
+
+    - name: Remove legacy single-instance unit file
+      ansible.builtin.file:
+        path: "{{ bridge_legacy_unit_path }}"
+        state: absent
+      when: legacy_unit.stat.exists
+      notify: Reload systemd
+
+    - name: Remove legacy single-instance config
+      ansible.builtin.file:
+        path: "{{ bridge_legacy_config_path }}"
+        state: absent
 
   handlers:
     - name: Reload systemd
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: Restart huly-bridge
+    - name: Restart all bridge instances
       ansible.builtin.systemd:
-        name: "{{ bridge_service }}"
+        name: "huly-bridge@{{ item }}.service"
         state: restarted
+      loop: "{{ bridge_workspaces }}"
+
+    - name: Restart changed bridge instance
+      ansible.builtin.systemd:
+        name: "huly-bridge@{{ item.item }}.service"
+        state: restarted
+      loop: "{{ rendered_configs.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.changed | default(false)
 
   post_tasks:
-    - name: Wait for service to settle
+    - name: Wait for instances to settle
       ansible.builtin.pause:
         seconds: 3
 
-    - name: Check service is active
-      ansible.builtin.command: systemctl is-active {{ bridge_service }}
+    - name: Check each instance is active
+      ansible.builtin.command: "systemctl is-active huly-bridge@{{ item }}.service"
       register: svc_active
       changed_when: false
       failed_when: svc_active.stdout != "active"
+      loop: "{{ bridge_workspaces }}"
+      loop_control:
+        label: "{{ item }}"
 
-    - name: Show recent logs
-      ansible.builtin.command: journalctl -u {{ bridge_service }} -n 20 --no-pager
+    - name: Show recent logs per workspace
+      ansible.builtin.command: "journalctl -u huly-bridge@{{ item }}.service -n 20 --no-pager"
       register: svc_logs
       changed_when: false
-      failed_when: "false"
+      failed_when: false
+      loop: "{{ bridge_workspaces }}"
+      loop_control:
+        label: "{{ item }}"
 
     - name: Report logs
       ansible.builtin.debug:
-        var: svc_logs.stdout_lines
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ svc_logs.results }}"
+      loop_control:
+        label: "{{ item.item }}"

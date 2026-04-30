@@ -169,18 +169,25 @@ NATS listens on `nats://127.0.0.1:4222`.
 
 ## 4. Bridge Deployment (per workspace)
 
-Each workspace needs its own config file and systemd unit.
+Each workspace runs as its own systemd template-instance:
+`huly-bridge@<workspace>.service`. One template unit, N instances, each
+with its own config file, dynamic user, port, and journal stream. A
+panic in one workspace's bridge cannot affect another's.
 
-> **Note:** `huly-bridge.service` no longer declares `After=nats.service`. The bridge starts independently and relies on its internal connection retry loop, so ordering against the rootless NATS user unit is unnecessary.
+> **Note:** the template unit does not declare `After=nats.service`. The bridge starts independently and relies on its internal connection retry loop, so ordering against the rootless NATS user unit is unnecessary.
+
+> **Upgrading from a single-instance bridge?** Follow
+> [`docs/operations/migration-per-workspace.md`](docs/operations/migration-per-workspace.md)
+> for the cutover and rollback path.
 
 ### 4.1 Create config
 
 ```bash
-sudo mkdir -p /etc/huly-bridge
-sudo chmod 0755 /etc/huly-bridge
+sudo install -d -m 0755 /etc/huly-bridge
+sudo install -d -m 0755 /etc/huly-bridge/workspaces.d
 ```
 
-Create `/etc/huly-bridge/<workspace>.toml` for each workspace. Example for workspace `acme`:
+Create `/etc/huly-bridge/workspaces.d/<workspace>.toml` per workspace. Filename MUST match `[huly] workspace` — the template unit substitutes `%i` from the instance name. Example for workspace `acme`:
 
 ```toml
 [huly]
@@ -238,58 +245,44 @@ level = "info"
 Lock down config files — they contain auth tokens/passwords:
 
 ```bash
-sudo chmod 0600 /etc/huly-bridge/*.toml
-sudo chown root:root /etc/huly-bridge/*.toml
+sudo chmod 0640 /etc/huly-bridge/workspaces.d/*.toml
+sudo chown root:root /etc/huly-bridge/workspaces.d/*.toml
 ```
 
-The systemd unit uses `DynamicUser=yes` with `ReadOnlyPaths=/etc/huly-bridge`, so the dynamic user can read but not modify these files.
+The template unit uses `DynamicUser=yes` with `ReadOnlyPaths=/etc/huly-bridge`, so the dynamic user can read but not modify these files.
 
-### 4.2 Create systemd unit (per workspace)
+### 4.2 Install the template unit
 
-Copy and customize for each workspace:
+The template is installed once; instances are spawned per workspace.
 
 ```bash
-sudo cp systemd/huly-bridge.service /etc/systemd/system/huly-bridge-acme.service
-```
-
-```bash
-sudo chmod 0644 /etc/systemd/system/huly-bridge-acme.service
-```
-
-Edit the unit — change only two lines:
-
-```ini
-ExecStart=/usr/local/bin/huly-bridge --config /etc/huly-bridge/acme.toml
-SyslogIdentifier=huly-bridge-acme
-```
-
-Repeat for each workspace:
-
-```bash
-sudo cp systemd/huly-bridge.service /etc/systemd/system/huly-bridge-beta.service
-# Edit: --config /etc/huly-bridge/beta.toml, SyslogIdentifier=huly-bridge-beta
-```
-
-### 4.3 Enable and start
-
-```bash
+sudo install -m 0644 systemd/huly-bridge@.service /etc/systemd/system/
 sudo systemctl daemon-reload
-
-# Start all bridges
-sudo systemctl enable --now huly-bridge-acme
-sudo systemctl enable --now huly-bridge-beta
 ```
+
+### 4.3 Enable and start one instance per workspace
+
+```bash
+sudo systemctl enable --now huly-bridge@acme.service
+sudo systemctl enable --now huly-bridge@beta.service
+```
+
+The `%i` in the unit's `ExecStart` resolves to `acme` / `beta` and
+points at `/etc/huly-bridge/workspaces.d/<ws>.toml`.
 
 ### 4.4 Check status
 
 ```bash
-# Service status
-sudo systemctl status huly-bridge-acme
-sudo systemctl status huly-bridge-beta
+# Per-instance status
+sudo systemctl status huly-bridge@acme.service
+sudo systemctl status huly-bridge@beta.service
+
+# All instances at once
+sudo systemctl list-units 'huly-bridge@*.service'
 
 # Logs (per workspace)
-journalctl -u huly-bridge-acme -f
-journalctl -u huly-bridge-beta -f
+journalctl -u huly-bridge@acme.service -f
+journalctl -u huly-bridge@beta.service -f
 
 # Health endpoints
 curl http://127.0.0.1:9090/readyz   # acme
@@ -390,11 +383,13 @@ huly_bridge_nats_connected
 
 ## 7. Adding a New Workspace
 
-Repeat steps 4.1–4.3:
+1. Drop a config at `/etc/huly-bridge/workspaces.d/<workspace>.toml`
+   (filename must match `[huly] workspace`; assign a unique
+   `[admin] port`).
+2. `sudo systemctl enable --now huly-bridge@<workspace>.service`.
 
-1. Create `/etc/huly-bridge/<workspace>.toml` with unique port
-2. Copy systemd unit as `huly-bridge-<workspace>.service`
-3. `sudo systemctl daemon-reload && sudo systemctl enable --now huly-bridge-<workspace>`
+No unit file edits, no `daemon-reload` needed — the template handles
+new instances.
 
 The MCP server discovers new bridges automatically within 10 seconds (announcement interval).
 
@@ -403,10 +398,8 @@ The MCP server discovers new bridges automatically within 10 seconds (announceme
 ## 8. Removing a Workspace
 
 ```bash
-sudo systemctl disable --now huly-bridge-<workspace>
-sudo rm /etc/systemd/system/huly-bridge-<workspace>.service
-sudo rm /etc/huly-bridge/<workspace>.toml
-sudo systemctl daemon-reload
+sudo systemctl disable --now huly-bridge@<workspace>.service
+sudo rm /etc/huly-bridge/workspaces.d/<workspace>.toml
 ```
 
 The MCP server drops stale bridges after `stale_timeout_secs` (default 30s).
@@ -438,7 +431,7 @@ The Huly WebSocket protocol embeds the session token in the URL path (`wss://end
 | Service manager | `systemd` (`Type=notify`, `sd_notify`, watchdog) | Windows Service Manager (no `sd_notify`) |
 | Readiness integration | systemd notify socket | **Not wired up** — bridge will run, but service manager has no readiness signal |
 | Watchdog | `WATCHDOG=1` pings | **Not wired up** — no automatic restart on WS/NATS loss beyond process crash |
-| Config path (suggested) | `/etc/huly-bridge/<ws>.toml` | `C:\ProgramData\huly-bridge\<ws>.toml` |
+| Config path (suggested) | `/etc/huly-bridge/workspaces.d/<ws>.toml` | `C:\ProgramData\huly-bridge\<ws>.toml` |
 | Binary install (suggested) | `/usr/local/bin/` | `C:\Program Files\huly-bridge\` |
 | NATS | Rootless Podman Quadlet | Run NATS natively, in Docker Desktop, or point at a Linux NATS host |
 

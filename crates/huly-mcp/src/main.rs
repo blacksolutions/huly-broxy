@@ -1,3 +1,8 @@
+// Some modules carry helpers retained for the upcoming P5 tracker / markup
+// rewire; suppress dead-code warnings at the binary level rather than
+// scattering #[allow] attributes through the codebase.
+#![allow(dead_code)]
+
 mod config;
 mod huly_client_factory;
 mod jwt_broker_client;

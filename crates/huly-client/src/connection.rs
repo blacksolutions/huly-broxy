@@ -1,4 +1,4 @@
-use crate::huly::rpc::{
+use crate::rpc::{
     HelloRequest, ProtocolOptions, RpcRequest, RpcResponse, SerializeError,
     deserialize, serialize,
 };
@@ -68,7 +68,7 @@ pub struct HulyEvent {
 
 /// Trait for testability
 #[async_trait]
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(any(test, feature = "mock"), mockall::automock)]
 pub trait HulyConnection: Send + Sync {
     async fn send_request(
         &self,
@@ -546,7 +546,7 @@ impl HulyConnection for WsConnection {
             let pending = self.pending.lock().await;
             if pending.len() >= self.max_pending {
                 drop(pending);
-                crate::admin::metrics::record_pending_request_dropped();
+                metrics::counter!("huly_bridge_pending_requests_dropped_total").increment(1);
                 return Err(ConnectionError::PendingRequestsExceeded {
                     cap: self.max_pending,
                 });
@@ -575,11 +575,11 @@ async fn forward_event_or_drop(event_tx: &mpsc::Sender<HulyEvent>, event: HulyEv
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
             warn!("event channel full, dropping event");
-            crate::admin::metrics::record_event_dropped();
+            metrics::counter!("huly_bridge_events_dropped_total").increment(1);
         }
         Err(TrySendError::Closed(_)) => {
             warn!("event channel closed, dropping event");
-            crate::admin::metrics::record_event_dropped();
+            metrics::counter!("huly_bridge_events_dropped_total").increment(1);
         }
     }
 }

@@ -6,7 +6,7 @@
 
 mod common;
 
-use huly_bridge::huly::rest::{self, RestClient, ServerConfigCache};
+use huly_client::rest::{self, RestClient, ServerConfigCache};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -130,7 +130,7 @@ fn server_config_deserializes_camel_screaming_keys() {
         "ACCOUNTS_URL": "https://acc",
         "COLLABORATOR_URL": "https://collab"
     });
-    let cfg: huly_bridge::huly::rest::ServerConfig =
+    let cfg: huly_client::rest::ServerConfig =
         serde_json::from_value(raw).expect("decode");
     assert_eq!(cfg.accounts_url.as_deref(), Some("https://acc"));
     assert_eq!(cfg.collaborator_url.as_deref(), Some("https://collab"));

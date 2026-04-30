@@ -948,6 +948,7 @@ dependencies = [
  "clap",
  "futures",
  "http-body-util",
+ "huly-client",
  "huly-common",
  "metrics",
  "metrics-exporter-prometheus",
@@ -970,6 +971,33 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 0.26.11",
+ "wiremock",
+]
+
+[[package]]
+name = "huly-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "huly-common",
+ "metrics",
+ "mockall",
+ "pulldown-cmark",
+ "reqwest",
+ "rmp-serde",
+ "rustls",
+ "rustls-pemfile",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "snap",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
  "webpki-roots 0.26.11",
  "wiremock",
 ]

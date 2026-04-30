@@ -1,6 +1,6 @@
 //! REST client for the Huly transactor's `/api/v1/*` surface (0.7.19+).
 //!
-//! Sibling of [`crate::huly::client::HulyClient`] (which speaks the
+//! Sibling of [`crate::client::HulyClient`] (which speaks the
 //! WebSocket JSON-RPC protocol). The two share no state — REST endpoints
 //! exposed in 0.7.19 (search-fulltext, ensure-person, account, model,
 //! domain-request, …) are best modelled as plain HTTP instead of being
@@ -19,8 +19,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::bridge::rate_limit::RateLimitInfo;
-use crate::huly::rpc::Account;
+use crate::rate_limit::RateLimitInfo;
+use crate::rpc::Account;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -120,7 +120,7 @@ pub async fn bootstrap_server_config(rest: &RestClient, cache: &ServerConfigCach
     }
 }
 
-// `Account` and `SocialId` are now unified — see `crate::huly::rpc::{Account,
+// `Account` and `SocialId` are now unified — see `crate::rpc::{Account,
 // SocialId}`. The REST `GET /api/v1/account/{workspace}` endpoint and the WS
 // hello handshake decode into the same `Account` struct.
 

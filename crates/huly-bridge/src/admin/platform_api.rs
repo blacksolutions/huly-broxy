@@ -1,7 +1,7 @@
-use crate::bridge::schema_resolver::{ResolveError, SchemaHandle};
-use crate::huly::client::{ApplyIfResult, ClientError, PlatformClient};
-use crate::huly::collaborator::{CollaboratorClient, CollaboratorError};
-use crate::huly::markdown::{markdown_to_prosemirror_json, prosemirror_to_markdown};
+use huly_client::schema_resolver::{ResolveError, SchemaHandle};
+use huly_client::client::{ApplyIfResult, ClientError, PlatformClient};
+use huly_client::collaborator::{CollaboratorClient, CollaboratorError};
+use huly_client::markdown::{markdown_to_prosemirror_json, prosemirror_to_markdown};
 use crate::service::workspace_token::WorkspaceTokenCache;
 use axum::{
     Json,
@@ -364,9 +364,9 @@ fn validate_non_empty(field: &str, value: &str) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::schema_resolver::SchemaHandle;
-    use crate::huly::client::{ClientError, MockPlatformClient};
-    use crate::huly::connection::ConnectionError;
+    use huly_client::schema_resolver::SchemaHandle;
+    use huly_client::client::{ClientError, MockPlatformClient};
+    use huly_client::connection::ConnectionError;
 
     fn test_schema_handle_with_names(names: &[&str]) -> SchemaHandle {
         SchemaHandle::with_card_type_names_for_tests(names)
@@ -866,7 +866,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_if_returns_result() {
-        use crate::huly::client::ApplyIfResult;
+        use huly_client::client::ApplyIfResult;
         let mut mock = MockPlatformClient::new();
         mock.expect_apply_if_tx()
             .withf(|scope, _matches, _not_matches, txes| {
@@ -902,7 +902,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_if_forwards_not_matches() {
-        use crate::huly::client::ApplyIfResult;
+        use huly_client::client::ApplyIfResult;
         let mut mock = MockPlatformClient::new();
         mock.expect_apply_if_tx()
             .withf(|_scope, _matches, not_matches, _txes| {
@@ -980,7 +980,7 @@ mod tests {
     }
 
     fn markup_app_with_collab(collab_url: &str, token: &str) -> Router {
-        use crate::huly::collaborator::CollaboratorClient;
+        use huly_client::collaborator::CollaboratorClient;
         use secrecy::SecretString;
         let cache = WorkspaceTokenCache::new();
         cache.set(SecretString::from(token));
@@ -1014,7 +1014,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_markup_returns_503_when_no_workspace_token() {
-        use crate::huly::collaborator::CollaboratorClient;
+        use huly_client::collaborator::CollaboratorClient;
         let state = MarkupState {
             collaborator_client: Some(CollaboratorClient::new("http://collab.example")),
             workspace_token_cache: WorkspaceTokenCache::new(), // empty — no token yet
@@ -1131,7 +1131,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_markup_invalid_format_returns_400() {
-        use crate::huly::collaborator::CollaboratorClient;
+        use huly_client::collaborator::CollaboratorClient;
         use secrecy::SecretString;
         let cache = WorkspaceTokenCache::new();
         cache.set(SecretString::from("tok"));

@@ -1,5 +1,5 @@
 use crate::bridge::nats_publisher::{EventPublisher, PublishError, subject_for_event};
-use crate::huly::connection::HulyEvent;
+use huly_client::connection::HulyEvent;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;

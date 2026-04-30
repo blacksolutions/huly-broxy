@@ -12,7 +12,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use huly_bridge::admin::health::HealthState;
 use huly_bridge::admin::router::{AppState, create_router};
-use huly_bridge::huly::client::{ApplyIfResult, ClientError, PlatformClient};
+use huly_client::client::{ApplyIfResult, ClientError, PlatformClient};
 use huly_common::api::ApplyIfMatch;
 use huly_common::types::{Doc, FindOptions, FindResult, TxResult};
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -128,8 +128,8 @@ impl PlatformClient for FakeClient {
 
 fn build_state(client: Arc<FakeClient>) -> AppState {
     use huly_bridge::admin::platform_api::PlatformClientHandle;
-    use huly_bridge::bridge::schema_resolver::SchemaHandle;
-    use huly_bridge::huly::client::PlatformClient;
+    use huly_client::schema_resolver::SchemaHandle;
+    use huly_client::client::PlatformClient;
     use huly_bridge::service::workspace_token::WorkspaceTokenCache;
     use std::sync::RwLock;
     let metrics = PrometheusBuilder::new().build_recorder().handle();

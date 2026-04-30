@@ -1,12 +1,12 @@
-use crate::huly::connection::{ConnectionError, HulyConnection};
-use crate::huly::types::{Doc, FindOptions, FindResult, TxResult};
+use crate::connection::{ConnectionError, HulyConnection};
+use crate::types::{Doc, FindOptions, FindResult, TxResult};
 use async_trait::async_trait;
 use huly_common::api::ApplyIfMatch;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[async_trait]
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(any(test, feature = "mock"), mockall::automock)]
 pub trait PlatformClient: Send + Sync {
     async fn find_all(
         &self,
@@ -453,8 +453,8 @@ impl PlatformClient for HulyClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::huly::connection::MockHulyConnection;
-    use crate::huly::rpc::{RpcError, RpcResponse};
+    use crate::connection::MockHulyConnection;
+    use crate::rpc::{RpcError, RpcResponse};
     use huly_common::api::ApplyIfMatch;
 
     fn mock_response(result: Value) -> RpcResponse {

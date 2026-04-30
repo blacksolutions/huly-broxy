@@ -11,7 +11,7 @@
 //! `core:class:Association`) pass through verbatim; only MasterTag and
 //! Association *instance* IDs are workspace-local. See [`is_platform_id`].
 
-use crate::huly::client::{ClientError, PlatformClient};
+use crate::client::{ClientError, PlatformClient};
 use huly_common::announcement::WorkspaceSchema;
 use huly_common::types::Doc;
 use serde_json::{Value, json};
@@ -290,7 +290,7 @@ fn pick_name(attrs: &Value, keys: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::huly::client::MockPlatformClient;
+    use crate::client::MockPlatformClient;
     use huly_common::types::FindResult;
 
     fn mock_doc(id: &str, class: &str, attrs: Value) -> Doc {

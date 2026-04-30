@@ -11,7 +11,6 @@
 
 #![allow(dead_code)]
 
-pub mod admin;
 pub mod bridge;
 pub mod config;
 pub mod error;

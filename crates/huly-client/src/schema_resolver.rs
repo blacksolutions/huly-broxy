@@ -59,8 +59,9 @@ impl SchemaHandle {
         }
     }
 
-    /// Snapshot of the resolved schema (for serving on the
-    /// `huly.bridge.schema.<workspace>` NATS subject).
+    /// Snapshot of the resolved schema. Used by the MCP factory's per-workspace
+    /// schema cache (D9). The legacy `huly.bridge.schema.<workspace>` NATS
+    /// subject was retired in P4.
     pub async fn resolved(&self) -> (u64, WorkspaceSchema) {
         let g = self.inner.read().await;
         (g.version, g.schema.clone())

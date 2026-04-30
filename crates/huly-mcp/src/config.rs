@@ -1,4 +1,3 @@
-use secrecy::SecretString;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use toml::Value;
@@ -21,16 +20,26 @@ pub struct NatsConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct McpSettings {
-    #[serde(default = "default_stale_timeout")]
-    pub stale_timeout_secs: u64,
-    /// Bearer token for authenticating with bridge `/api/v1/*` endpoints.
-    /// Must match the bridge's `admin.api_token` value.
-    pub bridge_api_token: Option<SecretString>,
+    /// Identifier of the calling agent. Required (D8): the bridge JWT broker
+    /// logs this for audit and per-agent rate-limit attribution. Failure to
+    /// set it (and the absence of an rmcp clientInfo override) is a fatal
+    /// startup error rather than a silent fallback.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Selected MCP transport. Per the P1 spike, "rest" is the only
+    /// implemented variant in P4; "ws" is reserved for a future variant
+    /// that talks to the transactor over WebSocket directly.
+    #[serde(default = "default_transport")]
+    pub transport: String,
     /// Optional configuration for the Node.js sync pipeline subprocess used
     /// by `huly_sync_status` and `huly_sync_cards`. If unset, those tools
     /// return a helpful error explaining how to configure them.
     #[serde(default)]
     pub sync: Option<SyncConfig>,
+}
+
+fn default_transport() -> String {
+    "rest".to_string()
 }
 
 /// Configuration for shelling out to the upstream Node.js sync pipeline.
@@ -80,10 +89,6 @@ fn default_nats_url() -> String {
     "nats://127.0.0.1:4222".to_string()
 }
 
-fn default_stale_timeout() -> u64 {
-    30
-}
-
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -91,8 +96,8 @@ fn default_log_level() -> String {
 impl Default for McpSettings {
     fn default() -> Self {
         Self {
-            stale_timeout_secs: default_stale_timeout(),
-            bridge_api_token: None,
+            agent_id: None,
+            transport: default_transport(),
             sync: None,
         }
     }
@@ -167,8 +172,24 @@ mod tests {
 
         let config: McpConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.nats.url, "nats://localhost:4222");
-        assert_eq!(config.mcp.stale_timeout_secs, 30);
+        assert_eq!(config.mcp.transport, "rest");
+        assert!(config.mcp.agent_id.is_none());
         assert_eq!(config.log.level, "info");
+    }
+
+    #[test]
+    fn parse_agent_id_from_mcp_section() {
+        let toml = r#"
+            [nats]
+            url = "nats://localhost:4222"
+
+            [mcp]
+            agent_id = "claude-code-murat-001"
+            transport = "rest"
+        "#;
+        let config: McpConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.mcp.agent_id.as_deref(), Some("claude-code-murat-001"));
+        assert_eq!(config.mcp.transport, "rest");
     }
 
     #[test]
@@ -247,7 +268,7 @@ mod tests {
             credentials = "/etc/nats/creds"
 
             [mcp]
-            stale_timeout_secs = 60
+            agent_id = "claude-code-murat-001"
 
             [log]
             level = "debug"
@@ -255,7 +276,7 @@ mod tests {
         "#;
 
         let config: McpConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.mcp.stale_timeout_secs, 60);
+        assert_eq!(config.mcp.agent_id.as_deref(), Some("claude-code-murat-001"));
         assert_eq!(config.log.level, "debug");
         assert!(config.log.json);
     }

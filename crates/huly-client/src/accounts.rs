@@ -212,6 +212,28 @@ impl AccountsClient {
         self.call(&body, Some(token)).await
     }
 
+    /// JSON-RPC `getUserWorkspaces()` → list of workspaces the holder of
+    /// the given **account-service token** belongs to.
+    ///
+    /// Per P1 spike: this endpoint is served by the account service and
+    /// requires the `account_service_jwt` (NOT the workspace JWT). Wire
+    /// shape from `huly.core/packages/account-client/src/client.ts:349` is
+    /// `{method: "getUserWorkspaces", params: {}}` returning a JSON array
+    /// of `WorkspaceInfoWithStatus` records; we keep the inner shape as
+    /// `serde_json::Value` so MCP can pass it through to the tool caller
+    /// without coupling the bridge to Huly's full type tree.
+    pub async fn get_user_workspaces(
+        &self,
+        account_service_token: &str,
+    ) -> Result<Vec<serde_json::Value>, AccountsError> {
+        let body = json!({
+            "method": "getUserWorkspaces",
+            "params": {},
+            "id": 1,
+        });
+        self.call(&body, Some(account_service_token)).await
+    }
+
     /// JSON-RPC `getSocialIds({includeDeleted})` → list of all social
     /// identities for the authenticated account. The transactor stamps
     /// `modifiedBy` with the `huly`-type id from this list (see
@@ -695,6 +717,49 @@ mod tests {
         let c = AccountsClient::new(server.uri());
         let err = c.validate_otp("a@b.c", "999999").await.unwrap_err();
         assert!(matches!(err, AccountsError::Failed(m) if m.contains("invalid code")));
+    }
+
+    #[tokio::test]
+    async fn get_user_workspaces_returns_array_of_workspaces() {
+        // Per P1 spike: getUserWorkspaces uses the *account-service* token.
+        // Verify the wire shape upstream sends ({method, params:{}}) and
+        // that the response array is returned untouched.
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "getUserWorkspaces",
+                "params": {}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 1,
+                "result": [
+                    {"workspace": "muhasebot", "uuid": "ws-uuid-1", "url": "muhasebot"},
+                    {"workspace": "demo", "uuid": "ws-uuid-2", "url": "demo"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let c = AccountsClient::new(server.uri());
+        let workspaces = c.get_user_workspaces("acct-jwt").await.unwrap();
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0]["workspace"], "muhasebot");
+        assert_eq!(workspaces[1]["uuid"], "ws-uuid-2");
+    }
+
+    #[tokio::test]
+    async fn get_user_workspaces_propagates_rpc_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 1,
+                "error": {"code": -32001, "message": "not authenticated"}
+            })))
+            .mount(&server)
+            .await;
+        let c = AccountsClient::new(server.uri());
+        let err = c.get_user_workspaces("bad-jwt").await.unwrap_err();
+        assert!(matches!(err, AccountsError::Failed(m) if m.contains("not authenticated")));
     }
 
     #[tokio::test]

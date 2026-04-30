@@ -33,19 +33,11 @@ url = "nats://127.0.0.1:4222"
 subject_prefix = "huly"
 # credentials = "/path/to/nats.creds"
 
-[admin]
-host = "0.0.0.0"
-# 9090 collides with Cockpit on Fedora. 9095 is unassigned by common services.
-port = 9095
-# URL to advertise in NATS announcements for MCP discovery.
-# REQUIRED whenever `host` is a wildcard (0.0.0.0, ::) — otherwise MCP
-# clients on other hosts receive `http://0.0.0.0:9095` and fail to connect.
-# Set to a routable address reachable by every MCP client (LAN IP or DNS).
-# Bridge refuses to start if this is unset and host is a wildcard.
-advertise_url = "http://10.0.0.5:9095"
-# Bearer token for /api/v1/* endpoints. Required — without it, API returns 403.
-# Must match mcp.bridge_api_token in the MCP config.
-api_token = "change-me"
+# [admin] removed in P4 — the bridge no longer exposes an HTTP gateway.
+# MCP reaches the transactor directly via REST, getting workspace JWTs from
+# the bridge's JWT broker on `huly.bridge.mint`. Operators upgrading must
+# delete their entire [admin] section; the bridge will refuse to start
+# with one present.
 
 [log]
 level = "info"

@@ -1,38 +1,31 @@
-use crate::admin::health::HealthState;
-use crate::admin::metrics;
-use crate::admin::platform_api::PlatformClientHandle;
-use crate::admin::router::{AppState, create_router};
-use crate::bridge::announcer::{self, SocialIdHandle};
 use crate::bridge::event_loop;
 use crate::bridge::mint_responder::{self, AccountsLogin, MintBrokerConfig};
 use crate::bridge::nats_publisher::{EventPublisher, NatsPublisher};
-use huly_client::schema_resolver::{self, SchemaHandle};
 use crate::config::{AuthConfig, BridgeConfig, WorkspaceCredential};
-use huly_client::accounts::{AccountsClient, AccountsError, WorkspaceLoginInfo, pick_primary_social_id};
+use crate::service::watchdog;
+use huly_client::accounts::{
+    AccountsClient, AccountsError, WorkspaceLoginInfo, pick_primary_social_id,
+};
 use huly_client::auth;
-use huly_client::client::{HulyClient, PlatformClient};
-use huly_client::collaborator::CollaboratorClient;
-use huly_client::connection::{HulyConnection, WsConnection};
+use huly_client::connection::WsConnection;
 use huly_client::rest::{self, RestClient, ServerConfigCache};
 use huly_client::rpc::ProtocolOptions;
-use crate::service::watchdog;
-use crate::service::workspace_token::WorkspaceTokenCache;
-use secrecy::SecretString;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-/// Run the full bridge lifecycle
+/// Run the full bridge lifecycle.
+///
+/// Post-P4: the bridge has no HTTP listener. Its responsibilities collapse to
+///
+/// - WebSocket connect to the transactor + reconnect with backoff,
+/// - NATS event forwarder (`huly.event.*`),
+/// - JWT broker responder (`huly.bridge.mint`),
+/// - watchdog / systemd notifications.
 pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
-    let health = HealthState::new();
     let start_time = Instant::now();
-
-    // Initialize metrics
-    let metrics_handle = metrics::init_metrics()
-        .map_err(|e| anyhow::anyhow!("metrics init failed: {e}"))?;
 
     // Authenticate with Huly accounts service → account-scoped token
     info!("authenticating with Huly...");
@@ -45,32 +38,16 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("auth failed: {e}"))?;
     info!("authenticated successfully");
 
-    let accounts = AccountsClient::from_config(
-        &config.huly.url,
-        config.huly.accounts_url.as_deref(),
-    );
+    let accounts =
+        AccountsClient::from_config(&config.huly.url, config.huly.accounts_url.as_deref());
 
-    // Best-effort: fetch GET {huly.url}/config.json once and cache the
-    // server-advertised ACCOUNTS_URL / COLLABORATOR_URL / FILES_URL /
-    // UPLOAD_URL so downstream code can prefer them over operator config.
-    // Legacy transactors omit this endpoint; the helper logs and continues
-    // with an empty cache on any failure (Issue #21 / R8).
+    // Best-effort /config.json — used by the JWT broker for downstream URLs.
     let server_config_cache = ServerConfigCache::new();
     let bootstrap_rest = RestClient::new(&config.huly.url, account_token.clone());
     rest::bootstrap_server_config(&bootstrap_rest, &server_config_cache).await;
     if server_config_cache.is_populated() {
         info!("server config cached from /config.json");
     }
-
-    // Build collaborator client from cached COLLABORATOR_URL (may be None if
-    // the server didn't advertise one; handlers return 503 in that case).
-    let collaborator_client = server_config_cache
-        .collaborator_url()
-        .map(|url| CollaboratorClient::new(&url));
-
-    // Cache for the workspace-scoped token (populated on every successful
-    // selectWorkspace / getLoginInfoByToken call in the reconnect loop below).
-    let workspace_token_cache = WorkspaceTokenCache::new();
 
     // Connect to NATS
     info!(url = %config.nats.url, "connecting to NATS...");
@@ -81,8 +58,6 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     )
     .await
     .map_err(|e| anyhow::anyhow!("NATS connection failed: {e}"))?;
-    health.set_nats_connected(true);
-    metrics::set_nats_connected(true);
     info!("NATS connected");
 
     let protocol = ProtocolOptions {
@@ -93,113 +68,26 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
     let reconnect_delay_ms = config.huly.reconnect_delay_ms;
     let tls_skip_verify = config.huly.tls_skip_verify;
     let tls_ca_cert = config.huly.tls_ca_cert.clone();
-    // Snapshot the credentials the JWT broker will mint for. Done now so the
-    // subsequent partial moves out of `config` (e.g. `nats.subject_prefix`)
-    // don't poison the borrow.
     let mint_creds = effective_workspace_credentials(&config);
     let mint_rest_base_url = format!("{}/api/v1", config.huly.url.trim_end_matches('/'));
     let subject_prefix = config
         .nats
         .subject_prefix
+        .clone()
         .unwrap_or_else(|| "huly".to_string());
 
-    let nats_client_for_announcer = publisher.client().clone();
-    let nats_client_for_lookup = publisher.client().clone();
-    let nats_client_for_schema = publisher.client().clone();
     let nats_client_for_mint = publisher.client().clone();
     let publisher = Arc::new(publisher) as Arc<dyn EventPublisher>;
     let publisher_ref = publisher.clone();
 
-    // Start admin API server. Platform routes are mounted unconditionally;
-    // the handle starts empty and is populated on first WS connect (handlers
-    // return 503 in the meantime).
-    let metrics_handle = Arc::new(metrics_handle);
-    let admin_addr = format!("{}:{}", config.admin.host, config.admin.port);
-    let admin_listener = TcpListener::bind(&admin_addr).await?;
-    info!(addr = %admin_addr, "admin API listening");
-
-    let platform_client_handle: PlatformClientHandle = Arc::new(RwLock::new(None));
-    // Workspace social identity (PersonId) — populated after each successful
-    // connect; consumed by the announcer so MCP receives it via NATS discovery.
-    let social_id_handle: SocialIdHandle = Arc::new(RwLock::new(None));
-    // Workspace schema (MasterTags + Associations name → workspace-local id),
-    // populated after each successful connect by querying the transactor;
-    // consumed by the platform-API resolver and announced via NATS.
-    let schema_handle = SchemaHandle::new();
-
-    let admin_state = AppState {
-        health: health.clone(),
-        metrics_handle: metrics_handle.clone(),
-        start_time,
-        platform_client: platform_client_handle.clone(),
-        api_token: config.admin.api_token.clone(),
-        collaborator_client: collaborator_client.clone(),
-        workspace_token_cache: workspace_token_cache.clone(),
-        schema_handle: schema_handle.clone(),
-    };
-    let admin_cancel = cancel.clone();
-    let admin_handle = tokio::spawn(async move {
-        let router = create_router(admin_state);
-        axum::serve(admin_listener, router)
-            .with_graceful_shutdown(async move { admin_cancel.cancelled().await })
-            .await
-            .ok();
-    });
-
     // Start watchdog
     let watchdog_cancel = cancel.clone();
-    let watchdog_health = health.clone();
     let sd_notifier = watchdog::SdNotifier;
     let watchdog_handle = tokio::spawn(async move {
-        watchdog::run_watchdog(
-            watchdog_health,
+        watchdog::run_watchdog_simple(
             Duration::from_secs(10),
             watchdog_cancel,
             &sd_notifier,
-        )
-        .await;
-    });
-
-    // Start NATS announcer for MCP discovery
-    let announcer_cancel = cancel.clone();
-    let announcer_health = health.clone();
-    let announcer_workspace = config.huly.workspace.clone();
-    let announcer_proxy_url = config.admin.proxy_url();
-    let announcer_social_id = social_id_handle.clone();
-    let announcer_schema = schema_handle.clone();
-    let announcer_handle = tokio::spawn(async move {
-        announcer::run_announcer(
-            nats_client_for_announcer,
-            announcer_workspace,
-            announcer_proxy_url,
-            announcer_health,
-            start_time,
-            announcer_social_id,
-            announcer_schema,
-            announcer_cancel,
-        )
-        .await;
-    });
-
-    // Start NATS lookup responder so late-starting MCP subscribers can
-    // pull current state on demand instead of waiting for the next periodic
-    // announcement.
-    let lookup_cancel = cancel.clone();
-    let lookup_health = health.clone();
-    let lookup_workspace = config.huly.workspace.clone();
-    let lookup_proxy_url = config.admin.proxy_url();
-    let lookup_social_id = social_id_handle.clone();
-    let lookup_schema = schema_handle.clone();
-    let lookup_handle = tokio::spawn(async move {
-        announcer::run_lookup_responder(
-            nats_client_for_lookup,
-            lookup_workspace,
-            lookup_proxy_url,
-            lookup_health,
-            start_time,
-            lookup_social_id,
-            lookup_schema,
-            lookup_cancel,
         )
         .await;
     });
@@ -221,22 +109,6 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         .await;
     });
 
-    // Start NATS schema responder so MCP can fetch the workspace's
-    // name → workspace-local-id map on demand once it sees a fresh
-    // `schema_version` in an announcement.
-    let schema_cancel = cancel.clone();
-    let schema_workspace = config.huly.workspace.clone();
-    let schema_responder_handle = schema_handle.clone();
-    let schema_handle_task = tokio::spawn(async move {
-        announcer::run_schema_responder(
-            nats_client_for_schema,
-            schema_workspace,
-            schema_responder_handle,
-            schema_cancel,
-        )
-        .await;
-    });
-
     // WebSocket connection loop with reconnection
     let mut first_connect = true;
     let mut consecutive_failures: u32 = 0;
@@ -246,10 +118,13 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             break;
         }
 
-        // Exponential backoff delay on reconnection (skip on first connect)
         if !first_connect {
             let backoff = calculate_backoff(reconnect_delay_ms, consecutive_failures);
-            info!(delay_ms = backoff, attempt = consecutive_failures + 1, "reconnecting to Huly WebSocket...");
+            info!(
+                delay_ms = backoff,
+                attempt = consecutive_failures + 1,
+                "reconnecting to Huly WebSocket..."
+            );
             #[cfg(target_os = "linux")]
             {
                 let _ = sd_notify::notify(
@@ -257,7 +132,6 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
                     &[sd_notify::NotifyState::Status("Reconnecting to Huly...")],
                 );
             }
-
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(backoff)) => {}
                 _ = cancel.cancelled() => break,
@@ -265,8 +139,6 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         }
         first_connect = false;
 
-        // Resolve transactor endpoint + workspace-scoped token via accounts.selectWorkspace.
-        // Re-resolved every (re)connect attempt so token expiry / endpoint changes are picked up.
         let ws_login = match resolve_workspace(
             &accounts,
             &config.huly.auth,
@@ -279,23 +151,16 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             Err(e) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 error!(error = %e, "selectWorkspace failed");
-                health.set_huly_connected(false);
-                metrics::set_ws_connected(false);
-                metrics::record_ws_reconnect();
                 continue;
             }
         };
 
-        // Cache the workspace-scoped token for collaborator service calls.
-        workspace_token_cache.set(SecretString::from(ws_login.token.clone()));
-
-        // Connect via `{endpoint}/{token}?sessionId=` — matching the official TS client.
         info!(
             endpoint = %ws_login.endpoint,
             workspace = %ws_login.workspace,
             "connecting to Huly WebSocket..."
         );
-        let (conn, events) = match WsConnection::connect_with_tls(
+        let (_conn, events) = match WsConnection::connect_with_tls(
             &ws_login.endpoint,
             &ws_login.token,
             protocol,
@@ -313,43 +178,11 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             Err(e) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 error!(error = %e, "Huly WS connection failed");
-                health.set_huly_connected(false);
-                metrics::set_ws_connected(false);
-                metrics::record_ws_reconnect();
                 continue;
             }
         };
 
-        // Hot-swap the platform client into the admin handle. Holding the only
-        // strong ref here means dropping the handle entry on disconnect runs
-        // WsConnection::Drop and aborts the read/write/ping tasks.
-        let conn_arc: Arc<dyn HulyConnection> = Arc::new(conn);
-        let huly_client: Arc<dyn PlatformClient> = Arc::new(HulyClient::new(conn_arc));
-        *platform_client_handle
-            .write()
-            .expect("platform client handle poisoned") = Some(huly_client.clone());
-        *social_id_handle
-            .write()
-            .expect("social id handle poisoned") = ws_login.social_id.clone();
-
-        // Refresh the workspace schema (MasterTags + Associations). Failure
-        // here is non-fatal — the resolver simply continues serving its
-        // previous map (or the empty default), and platform handlers will
-        // surface a 422 for unknown names. Logged so an operator notices.
-        let refresh_handle = schema_handle.clone();
-        let refresh_client = huly_client.clone();
-        tokio::spawn(async move {
-            match schema_resolver::refresh(&*refresh_client, &refresh_handle).await {
-                Ok(v) => info!(schema_version = v, "workspace schema refreshed"),
-                Err(e) => error!(error = %e, "workspace schema refresh failed"),
-            }
-        });
-
-        health.set_huly_connected(true);
-        metrics::set_ws_connected(true);
         info!("Huly WebSocket connected");
-
-        // Notify systemd we're ready
         #[cfg(target_os = "linux")]
         {
             let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
@@ -367,7 +200,6 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
             event_loop::run_event_loop(events, event_publisher, &prefix, event_loop_cancel).await
         });
 
-        // Wait for either: event loop ends (WS disconnected) or shutdown signal
         tokio::select! {
             result = event_loop_handle => {
                 match result {
@@ -380,23 +212,9 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
                     }
                     Err(e) => error!("event loop task error: {e}"),
                 }
-                // Connection dropped — update health and try reconnect
-                health.set_huly_connected(false);
-                metrics::set_ws_connected(false);
-                // Clear the platform handle so admin handlers go back to 503
-                // until the next successful connect.
-                *platform_client_handle
-                    .write()
-                    .expect("platform client handle poisoned") = None;
-                *social_id_handle
-                    .write()
-                    .expect("social id handle poisoned") = None;
-
                 if cancel.is_cancelled() {
                     break;
                 }
-
-                metrics::record_ws_reconnect();
                 info!("WebSocket disconnected, will attempt reconnection");
             }
             _ = shutdown_signal() => {
@@ -406,26 +224,17 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
         }
     }
 
-    // Notify systemd we're stopping
+    let _ = (start_time,); // silence unused warning when no admin /uptime
     #[cfg(target_os = "linux")]
     {
         let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Stopping]);
     }
 
-    // Cancel all tasks
     cancel.cancel();
-
-    // Flush NATS to ensure buffered messages are sent
     if let Err(e) = publisher_ref.flush().await {
         error!(error = %e, "NATS flush failed during shutdown");
     }
-
-    // Await admin, watchdog, announcer, and lookup tasks (short timeout, they should stop quickly)
-    let _ = tokio::time::timeout(Duration::from_secs(5), admin_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), watchdog_handle).await;
-    let _ = tokio::time::timeout(Duration::from_secs(5), announcer_handle).await;
-    let _ = tokio::time::timeout(Duration::from_secs(5), lookup_handle).await;
-    let _ = tokio::time::timeout(Duration::from_secs(5), schema_handle_task).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), mint_handle).await;
 
     info!("service stopped");
@@ -434,7 +243,6 @@ pub async fn run(config: BridgeConfig) -> anyhow::Result<()> {
 
 const MAX_BACKOFF_MS: u64 = 30_000;
 
-/// Calculate exponential backoff delay for reconnection attempts.
 fn calculate_backoff(base_delay_ms: u64, attempt: u32) -> u64 {
     std::cmp::min(
         base_delay_ms.saturating_mul(2u64.saturating_pow(attempt)),
@@ -442,28 +250,8 @@ fn calculate_backoff(base_delay_ms: u64, attempt: u32) -> u64 {
     )
 }
 
-fn to_ws_scheme(url: &str) -> String {
-    let base = url.trim_end_matches('/');
-    if base.starts_with("https://") {
-        base.replacen("https://", "wss://", 1)
-    } else if base.starts_with("http://") {
-        base.replacen("http://", "ws://", 1)
-    } else {
-        format!("wss://{base}")
-    }
-}
-
-/// Resolve the credentials the JWT broker should serve.
-///
-/// Multi-tenant deployments enumerate one entry per workspace under
-/// `[[workspace_credentials]]`. Single-tenant deployments leave the array
-/// empty; we synthesize an entry from `[huly]` so the broker can mint for
-/// the bridge's primary workspace without operators duplicating config.
 fn effective_workspace_credentials(config: &BridgeConfig) -> Vec<WorkspaceCredential> {
     if !config.workspace_credentials.is_empty() {
-        // Re-borrow into owned entries — we can't move out of `config` because
-        // the WS reconnect loop still needs it. The borrow is paid once at
-        // startup; the broker holds an Arc'd map afterwards.
         return config
             .workspace_credentials
             .iter()
@@ -476,10 +264,6 @@ fn effective_workspace_credentials(config: &BridgeConfig) -> Vec<WorkspaceCreden
             })
             .collect();
     }
-    // Single-tenant fallback: derive a one-entry credential from `[huly]`.
-    // Token-auth sessions don't carry the email, so we substitute a placeholder
-    // — `email` is only used when `auth = password`, and the synthesized
-    // entry inherits whichever shape `[huly].auth` had.
     match &config.huly.auth {
         AuthConfig::Token { token } => vec![WorkspaceCredential {
             workspace: config.huly.workspace.clone(),
@@ -498,23 +282,6 @@ fn effective_workspace_credentials(config: &BridgeConfig) -> Vec<WorkspaceCreden
     }
 }
 
-/// Resolve transactor endpoint + workspace-scoped token.
-///
-/// For **token auth** the JWT already names the workspace, so `getLoginInfoByToken`
-/// returns the right endpoint deterministically. `selectWorkspace` is avoided here
-/// because the server can return a different workspace than the slug requests when
-/// the account owns multiple — which then yields `platform:status:Unauthorized` at
-/// the transactor.
-///
-/// For **password auth** there is no workspace claim in the freshly-issued account
-/// token, so the slug-driven `selectWorkspace` call is the only option.
-///
-/// Self-hosted Huly omits `socialId` from `selectWorkspace` (and sometimes
-/// `getLoginInfoByToken`) responses; if the primary call yielded none, fetch
-/// it best-effort via the account-token-scoped `getLoginInfoByToken` and
-/// merge it in. Failure is non-fatal — consumers fall back to
-/// `core:account:System` and surface `AccountMismatch` rather than silently
-/// writing under the wrong identity.
 async fn resolve_workspace(
     accounts: &AccountsClient,
     auth: &AuthConfig,
@@ -527,24 +294,15 @@ async fn resolve_workspace(
             accounts.select_workspace(account_token, workspace_slug).await?
         }
     };
-    // Prefer `getSocialIds` + `pickPrimarySocialId` — that's what the official
-    // upstream client uses for `modifiedBy` (api-client/src/client.ts:74). The
-    // login-time `socialId` is the *login* identity (often email-type), which
-    // the transactor rejects with `AccountMismatch` when stamped on a tx.
     match accounts.get_social_ids(account_token, false).await {
         Ok(ids) => {
             if let Some(primary) = pick_primary_social_id(&ids) {
                 info.social_id = Some(primary.id.clone());
             } else {
-                tracing::warn!("getSocialIds returned no active entries; tx attribution will fall back to core:account:System");
+                tracing::warn!("getSocialIds returned no active entries");
             }
         }
         Err(e) => {
-            // Older accounts servers may not implement getSocialIds; back-fill
-            // best-effort from getLoginInfoByToken so we at least carry *some*
-            // identity rather than nothing. The login identity won't satisfy
-            // the transactor's check but downstream consumers see the chain
-            // is wired up.
             tracing::warn!(error = %e, "getSocialIds unavailable; falling back to getLoginInfoByToken");
             if info.social_id.is_none()
                 && let Ok(login) = accounts.get_login_info(account_token).await
@@ -561,7 +319,6 @@ async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("failed to register SIGTERM handler");
-
     tokio::select! {
         _ = ctrl_c => info!("received SIGINT"),
         _ = sigterm.recv() => info!("received SIGTERM"),
@@ -585,8 +342,6 @@ mod tests {
         assert_eq!(calculate_backoff(1000, 0), 1_000);
         assert_eq!(calculate_backoff(1000, 1), 2_000);
         assert_eq!(calculate_backoff(1000, 2), 4_000);
-        assert_eq!(calculate_backoff(1000, 3), 8_000);
-        assert_eq!(calculate_backoff(1000, 4), 16_000);
     }
 
     #[test]

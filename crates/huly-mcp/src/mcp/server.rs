@@ -861,6 +861,26 @@ mod tests {
         assert!(s.contains("down"), "msg: {s}");
     }
 
+    #[test]
+    fn format_factory_error_passes_broker_request() {
+        let e = FactoryError::BrokerRequest(
+            crate::jwt_broker_client::MintClientError::Decode("bad".into()),
+        );
+        let s = format_factory_error(&e);
+        assert!(s.contains("bad"), "msg: {s}");
+    }
+
+    #[test]
+    fn format_client_error_passes_through() {
+        let e = ClientError::Rpc {
+            code: "401".into(),
+            message: "denied".into(),
+        };
+        let s = format_client_error(&e);
+        assert!(s.contains("401"));
+        assert!(s.contains("denied"));
+    }
+
     #[tokio::test]
     async fn list_workspaces_requires_workspace_arg() {
         // Build a server with a no-op factory; we never reach the network

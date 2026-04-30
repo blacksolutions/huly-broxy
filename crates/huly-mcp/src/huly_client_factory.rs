@@ -163,15 +163,66 @@ impl HulyClientFactory {
     }
 
     /// Force a schema refresh for `workspace`. Used by the event-driven
-    /// invalidation path (D9): when MCP sees `huly.event.tx.core.class.*`
-    /// it calls this to re-resolve workspace-local MasterTag / Association
-    /// ids on the next tool call.
+    /// invalidation path (D9): when MCP sees a class/attribute mutation
+    /// transaction it calls this to re-resolve workspace-local
+    /// MasterTag / Association ids on the next tool call.
     pub async fn invalidate_schema(&self, workspace: &str) {
         let mut g = self.inner.write().await;
         if let Some(entry) = g.get_mut(workspace) {
             entry.schema_refreshed_at = None;
             debug!(workspace, "schema cache invalidated");
         }
+    }
+
+    /// Invalidate every cached workspace's schema. The transactor-event
+    /// stream doesn't carry a workspace id, so the subscribe-first
+    /// invalidator (`schema_invalidator`) calls this on every
+    /// schema-mutating TX. Returns the number of workspaces touched.
+    pub async fn invalidate_all_schemas(&self) -> usize {
+        let mut g = self.inner.write().await;
+        let n = g.len();
+        for entry in g.values_mut() {
+            entry.schema_refreshed_at = None;
+        }
+        if n > 0 {
+            debug!(count = n, "all schema caches invalidated");
+        }
+        n
+    }
+
+    /// Test-only: seed a workspace entry without going through the JWT
+    /// broker. Used by `schema_invalidator` integration tests.
+    #[cfg(test)]
+    pub async fn seed_test_entry(
+        &self,
+        workspace: &str,
+        client: Arc<RestHulyClient>,
+        schema_refreshed_at: Option<Instant>,
+    ) -> bool {
+        let entry = WorkspaceEntry {
+            client,
+            refresh_at_ms: now_ms() + 60_000,
+            account_service_jwt: None,
+            accounts_url: None,
+            collaborator_url: None,
+            workspace_uuid: "u".into(),
+            workspace_jwt: secrecy::SecretString::from("t"),
+            schema: SchemaHandle::new(),
+            schema_refreshed_at,
+        };
+        let mut g = self.inner.write().await;
+        g.insert(workspace.to_string(), entry);
+        true
+    }
+
+    /// Test-only: read the cached `schema_refreshed_at` for a workspace.
+    #[cfg(test)]
+    pub async fn schema_refreshed_at_for_test(
+        &self,
+        workspace: &str,
+    ) -> Option<Option<Instant>> {
+        let g = self.inner.read().await;
+        g.get(workspace).map(|e| e.schema_refreshed_at)
     }
 
     /// Forget the cached client for `workspace` so the next call mints a
@@ -380,6 +431,51 @@ mod tests {
         assert_eq!(collab.as_deref(), Some("https://collab.example"));
         let (ws_uuid, _jwt) = factory.collaborator_auth("ws").await.unwrap();
         assert_eq!(ws_uuid, "uuid-x");
+    }
+
+    #[tokio::test]
+    async fn invalidate_all_schemas_clears_every_workspace() {
+        let Ok(c) = async_nats::connect("nats://127.0.0.1:4222").await else {
+            return;
+        };
+        let factory = HulyClientFactory::new(c, "agent");
+        for ws in &["ws-a", "ws-b", "ws-c"] {
+            let entry = WorkspaceEntry {
+                client: Arc::new(RestHulyClient::new("http://x", "u", "t")),
+                refresh_at_ms: now_ms() + 60_000,
+                account_service_jwt: None,
+                accounts_url: None,
+                collaborator_url: None,
+                workspace_uuid: "u".into(),
+                workspace_jwt: secrecy::SecretString::from("t"),
+                schema: SchemaHandle::new(),
+                schema_refreshed_at: Some(Instant::now()),
+            };
+            factory.inner.write().await.insert((*ws).into(), entry);
+        }
+        let n = factory.invalidate_all_schemas().await;
+        assert_eq!(n, 3);
+        for ws in &["ws-a", "ws-b", "ws-c"] {
+            assert!(
+                factory
+                    .inner
+                    .read()
+                    .await
+                    .get(*ws)
+                    .unwrap()
+                    .schema_refreshed_at
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidate_all_schemas_no_op_when_empty() {
+        let Ok(c) = async_nats::connect("nats://127.0.0.1:4222").await else {
+            return;
+        };
+        let factory = HulyClientFactory::new(c, "agent");
+        assert_eq!(factory.invalidate_all_schemas().await, 0);
     }
 
     #[tokio::test]

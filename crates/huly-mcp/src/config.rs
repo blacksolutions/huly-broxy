@@ -16,6 +16,9 @@ pub struct NatsConfig {
     #[serde(default = "default_nats_url")]
     pub url: String,
     pub credentials: Option<String>,
+    /// Subject prefix used by the bridge when publishing transactor
+    /// events. Default `huly` matches `crates/huly-bridge` defaults.
+    pub subject_prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +261,27 @@ mod tests {
         assert_eq!(sync.node_binary, "/usr/local/bin/node");
         assert_eq!(sync.working_dir, std::path::PathBuf::from("/var/huly"));
         assert_eq!(sync.timeout_secs, 60);
+    }
+
+    #[test]
+    fn nats_subject_prefix_defaults_to_none() {
+        let toml = r#"
+            [nats]
+            url = "nats://localhost:4222"
+        "#;
+        let config: McpConfig = toml::from_str(toml).unwrap();
+        assert!(config.nats.subject_prefix.is_none());
+    }
+
+    #[test]
+    fn nats_subject_prefix_parses_when_set() {
+        let toml = r#"
+            [nats]
+            url = "nats://localhost:4222"
+            subject_prefix = "myapp"
+        "#;
+        let config: McpConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.nats.subject_prefix.as_deref(), Some("myapp"));
     }
 
     #[test]

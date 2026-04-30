@@ -100,6 +100,22 @@ mod tests {
     }
 
     #[test]
+    fn issue_status_name_round_trip() {
+        for st in IssueStatus::all() {
+            assert!(!st.name().is_empty());
+        }
+        assert_eq!(IssueStatus::Backlog.name(), "backlog");
+        assert_eq!(IssueStatus::InProgress.name(), "inProgress");
+    }
+
+    #[test]
+    fn no_parent_constant_pinned_to_upstream() {
+        assert_eq!(NO_PARENT, "tracker:ids:NoParent");
+        assert_eq!(MODEL_SPACE, "core:space:Model");
+        assert_eq!(TASK_TYPE_ISSUE, "tracker:taskTypes:Issue");
+    }
+
+    #[test]
     fn priority_name_known_values() {
         assert_eq!(priority_name(0), "NoPriority");
         assert_eq!(priority_name(1), "Urgent");

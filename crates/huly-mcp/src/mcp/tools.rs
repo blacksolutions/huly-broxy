@@ -1290,6 +1290,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_markup_with_source_ref_passes_through() {
+        use wiremock::matchers::{body_partial_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/rpc/.+"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "getContent",
+                "payload": {"source": "blob-src"}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": {
+                    "description": {
+                        "type": "doc",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": "hi"}]
+                        }]
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let collab = CollaboratorClient::new(&server.uri());
+        let token = SecretString::from("jwt");
+        let md = fetch_markup(
+            &collab,
+            &token,
+            "uuid",
+            "tracker:class:Issue",
+            "i1",
+            "description",
+            Some("blob-src"),
+        )
+        .await
+        .unwrap();
+        assert!(md.contains("hi"));
+    }
+
+    #[tokio::test]
     async fn upload_markup_round_trip_against_wiremock() {
         use wiremock::matchers::{method, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1345,6 +1385,48 @@ mod tests {
         assert!(err.to_lowercase().contains("collaborator"), "msg: {err}");
     }
 
+    #[test]
+    fn build_issue_attrs_renders_priority_zero_as_no_priority() {
+        let v = build_issue_attrs("h", "", IssueStatus::Backlog, 0, 1, "X", None);
+        assert_eq!(v["priority"], 0);
+        assert_eq!(v["estimation"], 0);
+    }
+
+    #[test]
+    fn derive_identifier_caps_at_four_letters() {
+        assert_eq!(derive_identifier("a b c d e"), "ABCD");
+    }
+
+    #[tokio::test]
+    async fn find_issues_attaches_priority_name_when_present() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all().returning(|_, _, _| {
+            Box::pin(async {
+                Ok(find_result(vec![doc(
+                    "i1",
+                    json!({"number": 1, "title": "T", "priority": 4}),
+                )]))
+            })
+        });
+        let out = find_issues(&mock, None, None, None, 100).await.unwrap();
+        assert_eq!(out[0]["priorityName"], "Low");
+    }
+
+    #[tokio::test]
+    async fn find_issues_no_priority_name_when_field_missing() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all().returning(|_, _, _| {
+            Box::pin(async {
+                Ok(find_result(vec![doc(
+                    "i1",
+                    json!({"number": 1, "title": "T"}),
+                )]))
+            })
+        });
+        let out = find_issues(&mock, None, None, None, 100).await.unwrap();
+        assert!(out[0].get("priorityName").is_none());
+    }
+
     #[tokio::test]
     async fn fetch_markup_returns_markdown_round_trip() {
         use wiremock::matchers::{method, path_regex};
@@ -1382,6 +1464,302 @@ mod tests {
         .await
         .unwrap();
         assert!(md.contains("Hello world"), "got: {md}");
+    }
+
+    // -------- additional coverage --------
+
+    #[tokio::test]
+    async fn find_issues_filters_by_status_and_query() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all()
+            .withf(|class, q, _| {
+                class == "tracker:class:Issue"
+                    && q["status"] == "tracker:status:Done"
+            })
+            .returning(|_, _, _| {
+                Box::pin(async {
+                    Ok(find_result(vec![
+                        doc(
+                            "i1",
+                            json!({"number": 1, "title": "fix bug", "status": "tracker:status:Done"}),
+                        ),
+                        doc(
+                            "i2",
+                            json!({"number": 2, "title": "rewrite", "status": "tracker:status:Done"}),
+                        ),
+                    ]))
+                })
+            });
+        let out = find_issues(
+            &mock,
+            None,
+            Some(IssueStatus::Done),
+            Some("bug"),
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["title"], "fix bug");
+    }
+
+    #[tokio::test]
+    async fn get_issue_attaches_relations_when_present() {
+        let mut mock = MockPlatformClient::new();
+        // First call: find the issue.
+        mock.expect_find_all()
+            .withf(|class, _, _| class == "tracker:class:Issue")
+            .returning(|_, _, _| {
+                Box::pin(async {
+                    Ok(find_result(vec![doc(
+                        "issue-1",
+                        json!({"identifier": "X-1"}),
+                    )]))
+                })
+            });
+        // Outgoing + incoming Relation queries.
+        mock.expect_find_all()
+            .withf(|class, _, _| class == "core:class:Relation")
+            .returning(|_, q, _| {
+                let q = q.clone();
+                Box::pin(async move {
+                    let id = if q.get("docA").is_some() {
+                        "rel-out"
+                    } else {
+                        "rel-in"
+                    };
+                    Ok(find_result(vec![doc(
+                        id,
+                        json!({"docA": "issue-1", "docB": "card-x", "association": "module"}),
+                    )]))
+                })
+            });
+        let v = get_issue(&mock, "X-1").await.unwrap().unwrap();
+        let rels = v["linkedRelations"].as_array().unwrap();
+        assert_eq!(rels.len(), 2);
+        let dirs: std::collections::HashSet<_> =
+            rels.iter().map(|r| r["direction"].as_str().unwrap()).collect();
+        assert!(dirs.contains("outgoing") && dirs.contains("incoming"));
+    }
+
+    #[tokio::test]
+    async fn update_issue_no_changes_returns_empty_changed_list() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all().returning(|_, _, _| {
+            Box::pin(async {
+                Ok(find_result(vec![doc(
+                    "issue-1",
+                    json!({"identifier": "X-1", "number": 1}),
+                )]))
+            })
+        });
+        let r = update_issue(&mock, "X-1", None, None, None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_issue_stamps_description_ref_when_provided() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all().returning(|_, _, _| {
+            Box::pin(async {
+                Ok(find_result(vec![doc(
+                    "issue-1",
+                    json!({"identifier": "X-1", "number": 1}),
+                )]))
+            })
+        });
+        mock.expect_update_collection()
+            .withf(|_, _, _, _, _, _, ops| ops["description"] == "blob-7")
+            .returning(|_, _, _, _, _, _, _| {
+                Box::pin(async {
+                    Ok(huly_common::types::TxResult {
+                        success: true,
+                        id: None,
+                    })
+                })
+            });
+        let changed = update_issue(
+            &mock,
+            "X-1",
+            None,
+            Some("blob-7"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(changed.contains(&"description".to_string()));
+    }
+
+    #[tokio::test]
+    async fn create_issue_returns_id_and_identifier_on_first_attempt() {
+        let mut mock = MockPlatformClient::new();
+        // Two find_one calls per attempt: project lookup. Return seq=0 once.
+        mock.expect_find_one().returning(|_, _, _| {
+            Box::pin(async {
+                Ok(Some(doc(
+                    "proj-1",
+                    json!({"identifier": "MUH", "sequence": 0}),
+                )))
+            })
+        });
+        mock.expect_apply_if_tx().returning(|_, _, _, _| {
+            Box::pin(async {
+                Ok(huly_client::client::ApplyIfResult {
+                    success: true,
+                    server_time: 1,
+                })
+            })
+        });
+        let project = doc("proj-1", json!({"identifier": "MUH", "sequence": 0}));
+        let (id, ident) = create_issue_in_project(
+            &mock,
+            &project,
+            "Hello",
+            None,
+            IssueStatus::Backlog,
+            0,
+            None,
+            "soc-1",
+        )
+        .await
+        .unwrap();
+        assert!(!id.is_empty());
+        assert_eq!(ident, "MUH-1");
+    }
+
+    #[tokio::test]
+    async fn find_cards_unknown_kind_propagates_schema_error() {
+        let mock = MockPlatformClient::new();
+        let schema = SchemaHandle::new();
+        let err = find_cards(&mock, &schema, Some("Module Spec"), None, 10)
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("schema"), "msg: {err}");
+    }
+
+    #[tokio::test]
+    async fn find_cards_unioning_all_known_kinds_when_kind_omitted() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all().returning(|class, _, _| {
+            let class = class.to_string();
+            Box::pin(async move {
+                if class == "tag-a" {
+                    Ok(find_result(vec![doc("c1", json!({"title": "Alpha"}))]))
+                } else {
+                    Ok(find_result(vec![doc("c2", json!({"title": "Beta"}))]))
+                }
+            })
+        });
+        let mut ws = huly_common::announcement::WorkspaceSchema::default();
+        ws.card_types.insert("A".into(), "tag-a".into());
+        ws.card_types.insert("B".into(), "tag-b".into());
+        let schema = SchemaHandle::install_for_tests(ws);
+        let cards = find_cards(&mock, &schema, None, None, 10).await.unwrap();
+        assert_eq!(cards.len(), 2);
+        // Sorted by title ascending.
+        assert_eq!(cards[0]["title"], "Alpha");
+        assert_eq!(cards[1]["title"], "Beta");
+    }
+
+    #[tokio::test]
+    async fn create_card_passes_through_extra_attributes() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_create_doc()
+            .withf(|class, _, attrs| {
+                class == "card:tag:Module"
+                    && attrs["title"] == "Hi"
+                    && attrs["foo"] == "bar"
+            })
+            .returning(|_, _, _| Box::pin(async { Ok("c-1".into()) }));
+        let mut ws = huly_common::announcement::WorkspaceSchema::default();
+        ws.card_types
+            .insert("Module Spec".into(), "card:tag:Module".into());
+        let schema = SchemaHandle::install_for_tests(ws);
+        let id = create_card(
+            &mock,
+            &schema,
+            "Module Spec",
+            "sp",
+            "Hi",
+            json!({"foo": "bar"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(id, "c-1");
+    }
+
+    #[tokio::test]
+    async fn link_issue_to_card_returns_already_linked_on_dup() {
+        let mut mock = MockPlatformClient::new();
+        // Issue lookup hits.
+        mock.expect_find_all().returning(|class, _, _| {
+            let class = class.to_string();
+            Box::pin(async move {
+                if class == "tracker:class:Issue" {
+                    Ok(find_result(vec![doc("issue-1", json!({}))]))
+                } else {
+                    Ok(find_result(vec![]))
+                }
+            })
+        });
+        mock.expect_apply_if_tx().returning(|_, _, _, _| {
+            Box::pin(async {
+                Ok(huly_client::client::ApplyIfResult {
+                    success: false,
+                    server_time: 0,
+                })
+            })
+        });
+        mock.expect_find_one().returning(|_, _, _| {
+            Box::pin(async {
+                Ok(Some(doc("rel-existing", json!({}))))
+            })
+        });
+        let mut ws = huly_common::announcement::WorkspaceSchema::default();
+        ws.associations
+            .insert("module".into(), "core:assoc:module".into());
+        let schema = SchemaHandle::install_for_tests(ws);
+        let r = link_issue_to_card(&mock, &schema, "X-1", "card-1", "module", None)
+            .await
+            .unwrap();
+        match r {
+            LinkResult::AlreadyLinked { id } => assert_eq!(id, "rel-existing"),
+            other => panic!("expected AlreadyLinked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_readme_trims_whitespace_in_heading() {
+        let (name, _) = parse_readme("#   Trimmed   \n\nbody\n");
+        assert_eq!(name, "Trimmed");
+    }
+
+    #[test]
+    fn derive_identifier_skips_punctuation() {
+        // Punctuation tokens are dropped because the first char isn't
+        // alphanumeric.
+        assert_eq!(derive_identifier("# Hello World"), "HW");
+    }
+
+    #[tokio::test]
+    async fn discover_propagates_first_error() {
+        let mut mock = MockPlatformClient::new();
+        mock.expect_find_all().returning(|_, _, _| {
+            Box::pin(async {
+                Err(huly_client::client::ClientError::Rpc {
+                    code: "500".into(),
+                    message: "boom".into(),
+                })
+            })
+        });
+        let err = discover(&mock).await.unwrap_err();
+        assert!(err.contains("boom"), "msg: {err}");
     }
 
     #[tokio::test]

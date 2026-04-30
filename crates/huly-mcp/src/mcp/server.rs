@@ -119,6 +119,54 @@ pub struct UpdateIssueParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CreateIssueParams {
+    pub workspace: String,
+    /// Project _id OR identifier (e.g. "MUH"). Optional only when the
+    /// workspace has exactly one project.
+    #[serde(default)]
+    pub project: Option<String>,
+    pub title: String,
+    /// Already-resolved MarkupBlobRef (call `huly_upload_markup` first).
+    #[serde(default)]
+    pub description_ref: Option<String>,
+    #[serde(default)]
+    pub status: Option<IssueStatus>,
+    #[serde(default)]
+    pub priority: Option<u8>,
+    #[serde(default)]
+    pub component: Option<String>,
+    /// Optional override for the `modifiedBy` PersonId. Defaults to
+    /// `core:account:System` (only valid against bridges that haven't
+    /// upgraded; production should pass the announced socialId).
+    #[serde(default)]
+    pub modified_by: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CreateComponentParams {
+    pub workspace: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub modified_by: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CreateProjectParams {
+    pub workspace: String,
+    pub name: String,
+    /// 1–4 letter project prefix (e.g. "MUH"). When omitted, derived from
+    /// the name's initials.
+    #[serde(default)]
+    pub identifier: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SyncStatusParams {}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -418,6 +466,97 @@ impl HulyMcpServer {
             .to_string()),
             None => Err(format!("Issue '{}' not found.", params.identifier)),
         }
+    }
+
+    /// Create a tracker issue (race-resistant via apply_if_tx).
+    #[tool(
+        name = "huly_create_issue",
+        description = "Create a tracker issue under a project. Returns issue id + identifier."
+    )]
+    async fn create_issue_tool(
+        &self,
+        Parameters(params): Parameters<CreateIssueParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let project = tools::resolve_project(&*client, params.project.as_deref()).await?;
+        let modified_by = params
+            .modified_by
+            .as_deref()
+            .unwrap_or(crate::txcud::SYSTEM_ACCOUNT);
+        let (id, identifier) = tools::create_issue_in_project(
+            &*client,
+            &project,
+            &params.title,
+            params.description_ref.as_deref(),
+            params.status.unwrap_or(IssueStatus::Backlog),
+            params.priority.unwrap_or(0),
+            params.component.as_deref(),
+            modified_by,
+        )
+        .await?;
+        Ok(serde_json::json!({"id": id, "identifier": identifier}).to_string())
+    }
+
+    /// Create a tracker component (race-resistant via apply_if_tx).
+    #[tool(
+        name = "huly_create_component",
+        description = "Create a tracker component under a project. Idempotent on (project, label)."
+    )]
+    async fn create_component_tool(
+        &self,
+        Parameters(params): Parameters<CreateComponentParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let project = tools::resolve_project(&*client, params.project.as_deref()).await?;
+        let modified_by = params
+            .modified_by
+            .as_deref()
+            .unwrap_or(crate::txcud::SYSTEM_ACCOUNT);
+        let r = tools::create_component(
+            &*client,
+            &project,
+            &params.label,
+            params.description.as_deref().unwrap_or(""),
+            modified_by,
+        )
+        .await?;
+        let v = match r {
+            tools::ComponentResult::Created { id, label } => serde_json::json!({
+                "status": "created",
+                "id": id,
+                "label": label,
+            }),
+            tools::ComponentResult::Existing { id, label } => serde_json::json!({
+                "status": "existing",
+                "id": id,
+                "label": label,
+            }),
+        };
+        Ok(v.to_string())
+    }
+
+    /// Create a tracker project.
+    #[tool(
+        name = "huly_create_project",
+        description = "Create a tracker project. `identifier` defaults to the name's initials."
+    )]
+    async fn create_project_tool(
+        &self,
+        Parameters(params): Parameters<CreateProjectParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let identifier = params
+            .identifier
+            .clone()
+            .unwrap_or_else(|| tools::derive_identifier(&params.name));
+        let id = tools::create_project(
+            &*client,
+            &params.name,
+            &identifier,
+            params.description.as_deref().unwrap_or(""),
+        )
+        .await?;
+        Ok(serde_json::json!({"id": id, "identifier": identifier}).to_string())
     }
 
     #[tool(

@@ -49,6 +49,11 @@ async-trait = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
+# Audit event helpers (P7)
+ulid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
 [dev-dependencies]
 wiremock = "0.6"
 huly-client = { path = "../huly-client", features = ["mock"] }

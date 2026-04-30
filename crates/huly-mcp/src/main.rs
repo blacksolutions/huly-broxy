@@ -3,6 +3,7 @@
 // scattering #[allow] attributes through the codebase.
 #![allow(dead_code)]
 
+mod audit;
 mod config;
 mod huly_client_factory;
 mod jwt_broker_client;

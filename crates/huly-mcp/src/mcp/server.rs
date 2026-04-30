@@ -167,6 +167,42 @@ pub struct CreateProjectParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FindCardsParams {
+    pub workspace: String,
+    /// MasterTag *name* (resolved via the per-workspace schema). Omit to
+    /// enumerate all known card types.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CreateCardParams {
+    pub workspace: String,
+    /// MasterTag *name* (resolved via the per-workspace schema).
+    pub kind: String,
+    pub space: String,
+    pub title: String,
+    /// Extra attributes merged into the create payload (must be a JSON object).
+    #[serde(default)]
+    pub attributes: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LinkIssueToCardParams {
+    pub workspace: String,
+    pub issue_identifier: String,
+    pub card_id: String,
+    /// Association *name* (e.g. "module"). Resolved via the per-workspace schema.
+    pub relation: String,
+    #[serde(default)]
+    pub modified_by: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SyncStatusParams {}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -557,6 +593,95 @@ impl HulyMcpServer {
         )
         .await?;
         Ok(serde_json::json!({"id": id, "identifier": identifier}).to_string())
+    }
+
+    /// Find cards (MasterTag instances), optionally filtered by kind name and title.
+    #[tool(
+        name = "huly_find_cards",
+        description = "Find cards. Pass `kind` (MasterTag name) to scope; omit to enumerate all card types."
+    )]
+    async fn find_cards_tool(
+        &self,
+        Parameters(params): Parameters<FindCardsParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let schema = self
+            .factory
+            .schema(&params.workspace)
+            .await
+            .map_err(|e| format_factory_error(&e))?;
+        let cards = tools::find_cards(
+            &*client,
+            &schema,
+            params.kind.as_deref(),
+            params.query.as_deref(),
+            params.limit.unwrap_or(200),
+        )
+        .await?;
+        serde_json::to_string_pretty(&cards).map_err(|e| format!("{e}"))
+    }
+
+    /// Create a card under a MasterTag.
+    #[tool(
+        name = "huly_create_card",
+        description = "Create a card of the given MasterTag. Returns the new card id."
+    )]
+    async fn create_card_tool(
+        &self,
+        Parameters(params): Parameters<CreateCardParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let schema = self
+            .factory
+            .schema(&params.workspace)
+            .await
+            .map_err(|e| format_factory_error(&e))?;
+        let id = tools::create_card(
+            &*client,
+            &schema,
+            &params.kind,
+            &params.space,
+            &params.title,
+            params.attributes,
+        )
+        .await?;
+        Ok(serde_json::json!({"id": id}).to_string())
+    }
+
+    /// Link an issue to a card via an Association.
+    #[tool(
+        name = "huly_link_issue_to_card",
+        description = "Create (or detect existing) a relation linking a tracker issue to a card."
+    )]
+    async fn link_issue_to_card_tool(
+        &self,
+        Parameters(params): Parameters<LinkIssueToCardParams>,
+    ) -> Result<String, String> {
+        let client = self.client_for(&params.workspace).await?;
+        let schema = self
+            .factory
+            .schema(&params.workspace)
+            .await
+            .map_err(|e| format_factory_error(&e))?;
+        let r = tools::link_issue_to_card(
+            &*client,
+            &schema,
+            &params.issue_identifier,
+            &params.card_id,
+            &params.relation,
+            params.modified_by.as_deref(),
+        )
+        .await?;
+        let v = match r {
+            tools::LinkResult::Created { id } => serde_json::json!({"status": "created", "id": id}),
+            tools::LinkResult::AlreadyLinked { id } => {
+                serde_json::json!({"status": "already_linked", "id": id})
+            }
+            tools::LinkResult::IssueNotFound => {
+                return Err(format!("Issue '{}' not found.", params.issue_identifier));
+            }
+        };
+        Ok(v.to_string())
     }
 
     #[tool(

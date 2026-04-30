@@ -32,6 +32,10 @@ subject_prefix = "huly"
 [admin]
 host = "0.0.0.0"
 port = 9095
+# Routable URL announced over NATS to MCP clients. REQUIRED when host is a
+# wildcard — set to the bridge host's LAN IP or DNS name. Bridge refuses to
+# start otherwise.
+advertise_url = "http://10.0.0.5:9095"
 # Bearer token for /api/v1/* endpoints. Required.
 # Must match mcp.bridge_api_token in the MCP config.
 api_token = "change-me"

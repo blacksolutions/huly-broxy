@@ -131,6 +131,54 @@ impl AdminConfig {
             .clone()
             .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
     }
+
+    /// Reject configurations that would announce an unroutable URL — bind
+    /// wildcards (`0.0.0.0`, `::`) work for listening but cannot be dialed
+    /// by MCP clients on other hosts.
+    fn validate(&self) -> anyhow::Result<()> {
+        match &self.advertise_url {
+            Some(url) => {
+                if is_unspecified_host(extract_host(url)) {
+                    anyhow::bail!(
+                        "[admin] advertise_url ({url}) uses an unspecified host; \
+                         set it to a routable address (e.g. the bridge host's LAN IP)"
+                    );
+                }
+            }
+            None => {
+                if is_unspecified_host(&self.host) {
+                    anyhow::bail!(
+                        "[admin] host is a wildcard ({}) and advertise_url is not set; \
+                         set advertise_url to a routable URL \
+                         (e.g. \"http://<lan-ip>:{}\") so MCP clients on other hosts \
+                         can reach this bridge",
+                        self.host,
+                        self.port,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_unspecified_host(host: &str) -> bool {
+    let trimmed = host.trim().trim_matches(|c| c == '[' || c == ']');
+    matches!(trimmed, "0.0.0.0" | "::" | "0:0:0:0:0:0:0:0")
+}
+
+fn extract_host(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    if let Some(rest) = authority.strip_prefix('[') {
+        rest.split_once(']').map(|(h, _)| h).unwrap_or(rest)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    }
 }
 
 impl Default for LogConfig {
@@ -146,6 +194,7 @@ impl BridgeConfig {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: BridgeConfig = toml::from_str(&content)?;
+        config.admin.validate()?;
         Ok(config)
     }
 }
@@ -323,6 +372,95 @@ mod tests {
 
         let result: Result<BridgeConfig, _> = toml::from_str(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_wildcard_bind_without_advertise_url() {
+        let admin = AdminConfig {
+            host: "0.0.0.0".into(),
+            port: 9095,
+            advertise_url: None,
+            api_token: None,
+        };
+        let err = admin.validate().unwrap_err().to_string();
+        assert!(err.contains("advertise_url"), "error should name the missing field: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_ipv6_wildcard_bind_without_advertise_url() {
+        let admin = AdminConfig {
+            host: "::".into(),
+            port: 9095,
+            advertise_url: None,
+            api_token: None,
+        };
+        assert!(admin.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_wildcard_bind_with_routable_advertise_url() {
+        let admin = AdminConfig {
+            host: "0.0.0.0".into(),
+            port: 9095,
+            advertise_url: Some("http://192.168.0.10:9095".into()),
+            api_token: None,
+        };
+        admin.validate().expect("routable advertise_url should pass");
+    }
+
+    #[test]
+    fn validate_rejects_wildcard_advertise_url() {
+        let admin = AdminConfig {
+            host: "0.0.0.0".into(),
+            port: 9095,
+            advertise_url: Some("http://0.0.0.0:9095".into()),
+            api_token: None,
+        };
+        assert!(admin.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_ipv6_wildcard_advertise_url() {
+        let admin = AdminConfig {
+            host: "0.0.0.0".into(),
+            port: 9095,
+            advertise_url: Some("http://[::]:9095/".into()),
+            api_token: None,
+        };
+        assert!(admin.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_specific_bind_host() {
+        let admin = AdminConfig {
+            host: "127.0.0.1".into(),
+            port: 9095,
+            advertise_url: None,
+            api_token: None,
+        };
+        admin.validate().expect("loopback bind should pass");
+    }
+
+    #[test]
+    fn validate_accepts_hostname_advertise_url() {
+        let admin = AdminConfig {
+            host: "0.0.0.0".into(),
+            port: 9095,
+            advertise_url: Some("http://bridge.internal:9095".into()),
+            api_token: None,
+        };
+        admin.validate().expect("hostname advertise_url should pass");
+    }
+
+    #[test]
+    fn extract_host_handles_ipv6_with_port() {
+        assert_eq!(extract_host("http://[::1]:9095/path"), "::1");
+        assert_eq!(extract_host("http://[::]:9095"), "::");
+    }
+
+    #[test]
+    fn extract_host_handles_userinfo() {
+        assert_eq!(extract_host("http://user:pw@host.example:9095/"), "host.example");
     }
 
     #[test]
